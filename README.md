@@ -71,15 +71,21 @@ icons:                        # optional, token -> emoji (case-insensitive match
 
 The add/edit dialog uses no native pickers or dropdowns (they are not touch-scrollable on some
 kiosk setups and never trigger an on-screen keyboard): person and icon are chips, the date is a
-row of weekday chips (plus ± one day), and start/end open an hour × minute grid (00/15/30/45).
-Changing the start keeps the duration (end follows).
+row of weekday chips (plus ± one day), and start/end open **iOS-style scroll wheels** (hour 0–23,
+minutes in 5-minute steps, snapping to the highlighted centre row). Changing the start keeps the
+duration (end follows).
 
 ### Drag & drop options
 
 ```yaml
 drag: true                    # optional, default true — long-press/drag events to move them
 drop_hours: [6, 22]           # optional, hour range shown in the drop-time panel
+drop_minutes_delay: 1600      # optional, ms to rest on an hour row before the minutes flyout opens
+drop_minute_step: 10          # optional, minute step of the flyout (10 → :00 :10 … :50)
 ```
+
+While dragging, the upper/lower half of an hour row picks :00/:30. Rest on the hour for
+`drop_minutes_delay` and a minutes column flies out next to it — drop there for an exact time.
 
 ## Companion: `fwp-reload-card`
 

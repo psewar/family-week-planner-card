@@ -668,7 +668,7 @@ var e5 = e4(class extends i5 {
 });
 
 // src/family-week-planner-card.js
-var CARD_VERSION = "0.4.0";
+var CARD_VERSION = "0.5.0";
 var WEEKDAYS = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"];
 var DEFAULT_PERSONS = [
   { key: "Familie", color: "126,87,194", border: "#7e57c2", text: "#c9b3f0", alpha: 0.13 },
@@ -773,7 +773,10 @@ var FamilyWeekPlannerCard = class extends i4 {
       // Drag & drop: long-press (touch) / drag (mouse) an event onto another cell to move it.
       drag: config.drag !== false,
       // Hour range offered in the drop-time panel [first, last].
-      drop_hours: Array.isArray(config.drop_hours) && config.drop_hours.length === 2 ? config.drop_hours : [6, 22]
+      drop_hours: Array.isArray(config.drop_hours) && config.drop_hours.length === 2 ? config.drop_hours : [6, 22],
+      // While dragging: rest on an hour row this long (ms) to open the minutes flyout (step in minutes).
+      drop_minutes_delay: config.drop_minutes_delay ?? 1600,
+      drop_minute_step: config.drop_minute_step ?? 10
     };
   }
   set hass(hass) {
@@ -1099,6 +1102,7 @@ var FamilyWeekPlannerCard = class extends i4 {
   }
   _endDrag() {
     this._clearPress();
+    this._flyLeave();
     this._pending = null;
     this._drag = null;
     this._detachWin();
@@ -1149,17 +1153,32 @@ var FamilyWeekPlannerCard = class extends i4 {
     if (!d3) return;
     const el = this.shadowRoot.elementFromPoint(x2, y3);
     const closest = (sel) => el && el.closest ? el.closest(sel) : null;
-    let { target, hoverT, panelRect } = d3;
+    let { target, hoverT, panelRect, flyHour } = d3;
     const row = closest(".drow");
     if (row) {
       const t4 = row.dataset.t;
-      if (t4 === "keep" || t4 === "allday") hoverT = t4;
-      else {
+      if (row.classList.contains("fly")) {
+        hoverT = t4;
+      } else if (t4 === "keep" || t4 === "allday") {
+        hoverT = t4;
+        this._flyLeave();
+        flyHour = null;
+      } else {
         const rr = row.getBoundingClientRect();
         hoverT = `${t4}:${y3 > rr.top + rr.height / 2 ? "30" : "00"}`;
+        if (t4 !== this._flyHoverHour) {
+          this._flyLeave();
+          if (flyHour && flyHour !== t4) flyHour = null;
+          this._flyHoverHour = t4;
+          this._flyTimer = setTimeout(() => {
+            if (this._drag && this._flyHoverHour === t4) this._drag = { ...this._drag, flyHour: t4 };
+          }, this.config.drop_minutes_delay);
+        }
       }
     } else if (closest(".droppanel")) {
     } else {
+      this._flyLeave();
+      flyHour = null;
       const td = closest("td.cell");
       if (td) {
         const person = td.dataset.person;
@@ -1175,7 +1194,14 @@ var FamilyWeekPlannerCard = class extends i4 {
         hoverT = null;
       }
     }
-    this._drag = { ...d3, target, hoverT, panelRect };
+    this._drag = { ...d3, target, hoverT, panelRect, flyHour };
+  }
+  _flyLeave() {
+    if (this._flyTimer) {
+      clearTimeout(this._flyTimer);
+      this._flyTimer = null;
+    }
+    this._flyHoverHour = null;
   }
   async _performDrop(d3) {
     const it = d3.item;
@@ -1260,7 +1286,8 @@ var FamilyWeekPlannerCard = class extends i4 {
     const [h0, h1] = this.config.drop_hours;
     const hours = [];
     for (let h3 = h0; h3 <= h1; h3++) hours.push(String(h3).padStart(2, "0"));
-    const W = Math.max(d3.panelRect.width, 190);
+    const FLYW = 104;
+    const W = Math.max(d3.panelRect.width, 190) + (d3.flyHour ? FLYW : 0);
     const H2 = 36 + 34 * (1 + hours.length);
     const vw = window.innerWidth;
     const vh = window.innerHeight;
@@ -1269,17 +1296,30 @@ var FamilyWeekPlannerCard = class extends i4 {
     const day = addDays(this._weekStart, d3.target.day);
     const person = this._persons().find((p3) => p3.key === d3.target.person);
     const hot = (t4) => d3.hoverT === t4 || !!d3.hoverT && d3.hoverT.startsWith(t4 + ":");
+    const step = Math.max(1, this.config.drop_minute_step);
+    const mins = [];
+    for (let m2 = 0; m2 < 60; m2 += step) mins.push(pad(m2));
+    const flyIdx = d3.flyHour ? hours.indexOf(d3.flyHour) : -1;
+    const flyTop = flyIdx >= 0 ? Math.min(36 + 34 * (1 + flyIdx), Math.max(0, H2 - 34 * mins.length)) : 0;
     return b2`<div class="droppanel" style=${o5({ left: `${left}px`, top: `${top}px`, width: `${W}px` })}>
-      <div class="drow head ${d3.hoverT === "keep" ? "hot" : ""}" data-t="keep">
-        <span>${WEEKDAYS[d3.target.day]} ${fmtDM(day)} · ${person ? person.label || person.key : ""}</span>
-        <span class="hint">Zeit behalten</span>
-      </div>
-      <div class="drow allday ${hot("allday") ? "hot" : ""}" data-t="allday">Ganztags</div>
-      ${hours.map(
-      (hh) => b2`<div class="drow ${hot(hh) ? "hot" : ""}" data-t=${hh}>
-          <span>${hh}:00</span>${hot(hh) ? b2`<span class="sel">${d3.hoverT}</span>` : ""}
-        </div>`
+      <div class="dpmain">
+        <div class="drow head ${d3.hoverT === "keep" ? "hot" : ""}" data-t="keep">
+          <span>${WEEKDAYS[d3.target.day]} ${fmtDM(day)} · ${person ? person.label || person.key : ""}</span>
+          <span class="hint">Zeit behalten</span>
+        </div>
+        <div class="drow allday ${hot("allday") ? "hot" : ""}" data-t="allday">Ganztags</div>
+        ${hours.map(
+      (hh) => b2`<div class="drow ${d3.flyHour === hh ? "open" : ""} ${hot(hh) ? "hot" : ""}" data-t=${hh}>
+            <span>${hh}:00</span>${hot(hh) ? b2`<span class="sel">${d3.hoverT}</span>` : d3.flyHour === hh ? b2`<span class="sel">›</span>` : ""}
+          </div>`
     )}
+      </div>
+      ${flyIdx >= 0 ? b2`<div class="dpfly" style=${o5({ marginTop: `${flyTop}px` })}>
+            ${mins.map((mm) => {
+      const t4 = `${d3.flyHour}:${mm}`;
+      return b2`<div class="drow fly ${d3.hoverT === t4 ? "hot" : ""}" data-t=${t4}>${t4}</div>`;
+    })}
+          </div>` : ""}
     </div>`;
   }
   getCardSize() {
@@ -1454,28 +1494,61 @@ var FamilyWeekPlannerCard = class extends i4 {
   _setEnd(h3, m2) {
     this._dialog = { ...this._dialog, end: `${pad(h3)}:${pad(m2)}`, error: "" };
   }
+  // iOS-style drum pickers: scroll-snapping wheels for hour (0-23) and minute (5-min steps).
   _renderTimePick(field) {
     const d3 = this._dialog;
     const [ch, cm] = String(d3[field] || "09:00").split(":").map(Number);
     const hours = [...Array(24).keys()];
-    const mins = [0, 15, 30, 45];
-    const set = (h3, m2) => field === "start" ? this._setStart(h3, m2) : this._setEnd(h3, m2);
-    return b2`<div class="tpick">
-      <div class="chips hours">
-        ${hours.map((h3) => b2`<button class="chip ${h3 === ch ? "on" : ""}" @click=${() => set(h3, cm)}>${pad(h3)}</button>`)}
-      </div>
-      <div class="chips mins">
-        ${mins.map(
-      (m2) => b2`<button
-            class="chip ${m2 === cm ? "on" : ""}"
-            @click=${() => {
-        set(ch, m2);
-        this._set("pick", null);
-      }}
-          >:${pad(m2)}</button>`
-    )}
+    const mins = [];
+    for (let m2 = 0; m2 < 60; m2 += 5) mins.push(m2);
+    const curM = cm - cm % 5;
+    const setH = (h3) => field === "start" ? this._setStart(h3, cm) : this._setEnd(h3, cm);
+    const setM = (m2) => field === "start" ? this._setStart(ch, m2) : this._setEnd(ch, m2);
+    const wheel = (kind, values, cur, onChange) => b2`<div class="wheelwrap">
+      <div class="wheel" data-kind=${kind} @scroll=${(e6) => this._wheelScroll(e6, values, onChange)}>
+        <div class="wpad"></div>
+        ${values.map((v2) => b2`<div class="witem ${v2 === cur ? "on" : ""}">${pad(v2)}</div>`)}
+        <div class="wpad"></div>
       </div>
     </div>`;
+    return b2`<div class="tpick wheels">
+      <div class="wheelrow">
+        <span class="wlabel">${field === "start" ? "Von" : "Bis"}</span>
+        ${wheel("h", hours, ch, setH)}
+        <div class="wcolon">:</div>
+        ${wheel("m", mins, curM, setM)}
+      </div>
+      <div class="wactions"><button class="chip" @click=${() => this._set("pick", null)}>Fertig</button></div>
+    </div>`;
+  }
+  _wheelScroll(e6, values, onChange) {
+    const el = e6.currentTarget;
+    if (el._prog) return;
+    clearTimeout(el._t);
+    el._t = setTimeout(() => {
+      const idx = Math.max(0, Math.min(values.length - 1, Math.round(el.scrollTop / 44)));
+      onChange(values[idx]);
+    }, 140);
+  }
+  updated(changed) {
+    super.updated(changed);
+    const pick = this._dialog && this._dialog.pick;
+    if (!pick) {
+      this._wheelKey = null;
+      return;
+    }
+    if (this._wheelKey === pick) return;
+    this._wheelKey = pick;
+    const [ch, cm] = String(this._dialog[pick] || "09:00").split(":").map(Number);
+    const pos = (kind, idx) => {
+      const el = this.shadowRoot.querySelector(`.wheel[data-kind="${kind}"]`);
+      if (!el) return;
+      el._prog = true;
+      el.scrollTop = idx * 44;
+      setTimeout(() => el._prog = false, 250);
+    };
+    pos("h", ch);
+    pos("m", Math.floor(cm / 5));
   }
   _renderDatePick() {
     const d3 = this._dialog;
@@ -2063,22 +2136,99 @@ __publicField(FamilyWeekPlannerCard, "styles", i`
       background: rgba(255, 255, 255, 0.05);
       border: 1px solid rgba(255, 255, 255, 0.12);
     }
-    .chips.hours {
-      display: grid;
-      grid-template-columns: repeat(12, 1fr);
+
+    /* ---- iOS-style time wheels ---- */
+    .wheelrow {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
     }
-    .chips.hours .chip {
-      min-height: 40px;
-      padding: 0;
+    .wlabel {
       font-size: 14px;
-      min-width: 0;
+      opacity: 0.8;
+      width: 36px;
     }
-    .chips.mins {
+    .wheelwrap {
+      position: relative;
+      width: 112px;
+      height: 220px;
+      border-radius: 12px;
+      background: rgba(255, 255, 255, 0.04);
+    }
+    .wheelwrap::before {
+      content: "";
+      position: absolute;
+      left: 6px;
+      right: 6px;
+      top: 88px;
+      height: 44px;
+      border-top: 1px solid rgba(255, 255, 255, 0.35);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.35);
+      border-radius: 8px;
+      pointer-events: none;
+    }
+    .wheel {
+      height: 220px;
+      overflow-y: auto;
+      scroll-snap-type: y mandatory;
+      scrollbar-width: none;
+      -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 30%, #000 70%, transparent 100%);
+      mask-image: linear-gradient(to bottom, transparent 0, #000 30%, #000 70%, transparent 100%);
+    }
+    .wheel::-webkit-scrollbar {
+      display: none;
+    }
+    .wpad {
+      height: 88px;
+    }
+    .witem {
+      height: 44px;
+      line-height: 44px;
+      text-align: center;
+      font-size: 24px;
+      scroll-snap-align: center;
+      opacity: 0.5;
+      font-variant-numeric: tabular-nums;
+    }
+    .witem.on {
+      opacity: 1;
+      font-weight: 700;
+    }
+    .wcolon {
+      font-size: 28px;
+      font-weight: 700;
+      opacity: 0.8;
+    }
+    .wactions {
+      display: flex;
+      justify-content: flex-end;
       margin-top: 8px;
     }
-    .chips.mins .chip {
+
+    /* ---- drop panel: minutes flyout ---- */
+    .droppanel {
+      display: flex;
+      align-items: flex-start;
+    }
+    .dpmain {
       flex: 1;
-      min-height: 42px;
+      min-width: 0;
+    }
+    .dpfly {
+      width: 104px;
+      border-left: 1px solid rgba(255, 255, 255, 0.16);
+      background: rgba(255, 255, 255, 0.04);
+    }
+    .drow.fly {
+      justify-content: center;
+      font-variant-numeric: tabular-nums;
+    }
+    .drow.open {
+      background: rgba(255, 255, 255, 0.1);
+    }
+    .drow.open.hot {
+      background: var(--primary-color, #03a9f4);
     }
   `);
 customElements.define("family-week-planner-card", FamilyWeekPlannerCard);
