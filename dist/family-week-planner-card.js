@@ -668,7 +668,7 @@ var e5 = e4(class extends i5 {
 });
 
 // src/family-week-planner-card.js
-var CARD_VERSION = "0.5.0";
+var CARD_VERSION = "0.5.1";
 var WEEKDAYS = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"];
 var DEFAULT_PERSONS = [
   { key: "Familie", color: "126,87,194", border: "#7e57c2", text: "#c9b3f0", alpha: 0.13 },
@@ -776,7 +776,7 @@ var FamilyWeekPlannerCard = class extends i4 {
       drop_hours: Array.isArray(config.drop_hours) && config.drop_hours.length === 2 ? config.drop_hours : [6, 22],
       // While dragging: rest on an hour row this long (ms) to open the minutes flyout (step in minutes).
       drop_minutes_delay: config.drop_minutes_delay ?? 1600,
-      drop_minute_step: config.drop_minute_step ?? 10
+      drop_minute_step: config.drop_minute_step ?? 5
     };
   }
   set hass(hass) {
@@ -1505,9 +1505,17 @@ var FamilyWeekPlannerCard = class extends i4 {
     const setH = (h3) => field === "start" ? this._setStart(h3, cm) : this._setEnd(h3, cm);
     const setM = (m2) => field === "start" ? this._setStart(ch, m2) : this._setEnd(ch, m2);
     const wheel = (kind, values, cur, onChange) => b2`<div class="wheelwrap">
-      <div class="wheel" data-kind=${kind} @scroll=${(e6) => this._wheelScroll(e6, values, onChange)}>
+      <div
+        class="wheel"
+        data-kind=${kind}
+        @scroll=${(e6) => this._wheelScroll(e6, values, onChange)}
+        @pointerdown=${(e6) => this._wheelDown(e6)}
+        @pointermove=${(e6) => this._wheelMove(e6)}
+        @pointerup=${(e6) => this._wheelUp(e6, values, onChange)}
+        @pointercancel=${(e6) => this._wheelUp(e6, values, onChange)}
+      >
         <div class="wpad"></div>
-        ${values.map((v2) => b2`<div class="witem ${v2 === cur ? "on" : ""}">${pad(v2)}</div>`)}
+        ${values.map((v2, i7) => b2`<div class="witem ${v2 === cur ? "on" : ""}" data-i=${i7}>${pad(v2)}</div>`)}
         <div class="wpad"></div>
       </div>
     </div>`;
@@ -1523,12 +1531,51 @@ var FamilyWeekPlannerCard = class extends i4 {
   }
   _wheelScroll(e6, values, onChange) {
     const el = e6.currentTarget;
-    if (el._prog) return;
+    if (el._prog || el._dragging) return;
     clearTimeout(el._t);
     el._t = setTimeout(() => {
       const idx = Math.max(0, Math.min(values.length - 1, Math.round(el.scrollTop / 44)));
       onChange(values[idx]);
     }, 140);
+  }
+  _wheelDown(e6) {
+    if (e6.pointerType !== "mouse" || e6.button !== void 0 && e6.button !== 0) return;
+    const el = e6.currentTarget;
+    el._dragging = true;
+    el._moved = false;
+    el._y0 = e6.clientY;
+    el._top0 = el.scrollTop;
+    el._downItem = e6.target && e6.target.closest ? e6.target.closest(".witem") : null;
+    el.classList.add("dragging");
+    try {
+      el.setPointerCapture(e6.pointerId);
+    } catch (_2) {
+    }
+    e6.preventDefault();
+  }
+  _wheelMove(e6) {
+    const el = e6.currentTarget;
+    if (!el._dragging) return;
+    const dy = e6.clientY - el._y0;
+    if (Math.abs(dy) > 3) el._moved = true;
+    el.scrollTop = el._top0 - dy;
+  }
+  _wheelUp(e6, values, onChange) {
+    const el = e6.currentTarget;
+    if (!el._dragging) return;
+    el._dragging = false;
+    el.classList.remove("dragging");
+    try {
+      el.releasePointerCapture(e6.pointerId);
+    } catch (_2) {
+    }
+    let idx = Math.round(el.scrollTop / 44);
+    if (!el._moved && el._downItem) idx = Number(el._downItem.dataset.i);
+    idx = Math.max(0, Math.min(values.length - 1, idx));
+    el._prog = true;
+    el.scrollTop = idx * 44;
+    setTimeout(() => el._prog = false, 250);
+    onChange(values[idx]);
   }
   updated(changed) {
     super.updated(changed);
@@ -2178,6 +2225,15 @@ __publicField(FamilyWeekPlannerCard, "styles", i`
     }
     .wheel::-webkit-scrollbar {
       display: none;
+    }
+    .wheel {
+      cursor: grab;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    .wheel.dragging {
+      scroll-snap-type: none;
+      cursor: grabbing;
     }
     .wpad {
       height: 88px;

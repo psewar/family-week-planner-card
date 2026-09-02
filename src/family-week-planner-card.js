@@ -19,7 +19,7 @@ import { LitElement, html, css } from "lit";
 import { styleMap } from "lit/directives/style-map.js";
 import { classMap } from "lit/directives/class-map.js";
 
-const CARD_VERSION = "0.5.0";
+const CARD_VERSION = "0.5.1";
 
 const WEEKDAYS = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"];
 
@@ -136,7 +136,7 @@ class FamilyWeekPlannerCard extends LitElement {
       drop_hours: Array.isArray(config.drop_hours) && config.drop_hours.length === 2 ? config.drop_hours : [6, 22],
       // While dragging: rest on an hour row this long (ms) to open the minutes flyout (step in minutes).
       drop_minutes_delay: config.drop_minutes_delay ?? 1600,
-      drop_minute_step: config.drop_minute_step ?? 10,
+      drop_minute_step: config.drop_minute_step ?? 5,
     };
   }
 
@@ -917,10 +917,20 @@ class FamilyWeekPlannerCard extends LitElement {
     const curM = cm - (cm % 5);
     const setH = (h) => (field === "start" ? this._setStart(h, cm) : this._setEnd(h, cm));
     const setM = (m) => (field === "start" ? this._setStart(ch, m) : this._setEnd(ch, m));
+    // Wheels scroll natively (touch / mouse wheel); for mouse pointers (incl. compositor
+    // mouse-emulated touch) we add drag-to-scroll and tap-to-select.
     const wheel = (kind, values, cur, onChange) => html`<div class="wheelwrap">
-      <div class="wheel" data-kind=${kind} @scroll=${(e) => this._wheelScroll(e, values, onChange)}>
+      <div
+        class="wheel"
+        data-kind=${kind}
+        @scroll=${(e) => this._wheelScroll(e, values, onChange)}
+        @pointerdown=${(e) => this._wheelDown(e)}
+        @pointermove=${(e) => this._wheelMove(e)}
+        @pointerup=${(e) => this._wheelUp(e, values, onChange)}
+        @pointercancel=${(e) => this._wheelUp(e, values, onChange)}
+      >
         <div class="wpad"></div>
-        ${values.map((v) => html`<div class="witem ${v === cur ? "on" : ""}">${pad(v)}</div>`)}
+        ${values.map((v, i) => html`<div class="witem ${v === cur ? "on" : ""}" data-i=${i}>${pad(v)}</div>`)}
         <div class="wpad"></div>
       </div>
     </div>`;
@@ -936,12 +946,53 @@ class FamilyWeekPlannerCard extends LitElement {
   }
   _wheelScroll(e, values, onChange) {
     const el = e.currentTarget;
-    if (el._prog) return; // programmatic positioning, not a user scroll
+    if (el._prog || el._dragging) return; // programmatic positioning / mid-drag, not a settled user scroll
     clearTimeout(el._t);
     el._t = setTimeout(() => {
       const idx = Math.max(0, Math.min(values.length - 1, Math.round(el.scrollTop / 44)));
       onChange(values[idx]);
     }, 140);
+  }
+  _wheelDown(e) {
+    if (e.pointerType !== "mouse" || (e.button !== undefined && e.button !== 0)) return;
+    const el = e.currentTarget;
+    el._dragging = true;
+    el._moved = false;
+    el._y0 = e.clientY;
+    el._top0 = el.scrollTop;
+    el._downItem = e.target && e.target.closest ? e.target.closest(".witem") : null;
+    el.classList.add("dragging"); // disables scroll-snap while dragging
+    try {
+      el.setPointerCapture(e.pointerId);
+    } catch (_) {
+      /* ignore */
+    }
+    e.preventDefault();
+  }
+  _wheelMove(e) {
+    const el = e.currentTarget;
+    if (!el._dragging) return;
+    const dy = e.clientY - el._y0;
+    if (Math.abs(dy) > 3) el._moved = true;
+    el.scrollTop = el._top0 - dy;
+  }
+  _wheelUp(e, values, onChange) {
+    const el = e.currentTarget;
+    if (!el._dragging) return;
+    el._dragging = false;
+    el.classList.remove("dragging");
+    try {
+      el.releasePointerCapture(e.pointerId);
+    } catch (_) {
+      /* ignore */
+    }
+    let idx = Math.round(el.scrollTop / 44);
+    if (!el._moved && el._downItem) idx = Number(el._downItem.dataset.i); // tap on a value selects it
+    idx = Math.max(0, Math.min(values.length - 1, idx));
+    el._prog = true;
+    el.scrollTop = idx * 44;
+    setTimeout(() => (el._prog = false), 250);
+    onChange(values[idx]);
   }
   updated(changed) {
     super.updated(changed);
@@ -1588,6 +1639,15 @@ class FamilyWeekPlannerCard extends LitElement {
     }
     .wheel::-webkit-scrollbar {
       display: none;
+    }
+    .wheel {
+      cursor: grab;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    .wheel.dragging {
+      scroll-snap-type: none;
+      cursor: grabbing;
     }
     .wpad {
       height: 88px;
