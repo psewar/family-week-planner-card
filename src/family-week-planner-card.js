@@ -19,7 +19,7 @@ import { LitElement, html, css } from "lit";
 import { styleMap } from "lit/directives/style-map.js";
 import { classMap } from "lit/directives/class-map.js";
 
-const CARD_VERSION = "0.1.0";
+const CARD_VERSION = "0.1.1";
 
 const WEEKDAYS = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"];
 
@@ -313,11 +313,20 @@ class FamilyWeekPlannerCard extends LitElement {
     this._dialog = { ...this._dialog, saving: true, error: "" };
     try {
       if (d.mode === "create") {
-        await this._hass.callWS({
-          type: "calendar/event/create",
-          entity_id: this.config.entity,
-          event: built.event,
-        });
+        try {
+          await this._hass.callWS({
+            type: "calendar/event/create",
+            entity_id: this.config.entity,
+            event: built.event,
+          });
+        } catch (e) {
+          // Some CalDAV backends (e.g. the n0tcaldav fork) write the event but
+          // then throw a serialization error on the response. Don't fail blindly:
+          // read the calendar back and treat it as success only if the event is
+          // actually there. A genuine failure still surfaces the error.
+          const ok = await this._verifyCreated(built.event);
+          if (!ok) throw e;
+        }
       } else {
         const msg = {
           type: "calendar/event/update",
@@ -336,6 +345,21 @@ class FamilyWeekPlannerCard extends LitElement {
     } catch (e) {
       this._dialog = { ...this._dialog, saving: false, error: this._errText(e) };
     }
+  }
+
+  async _verifyCreated(event) {
+    // Re-fetch and check whether an event matching what we just sent now exists.
+    const startDay = String(event.dtstart).slice(0, 10);
+    for (let i = 0; i < 4; i++) {
+      await this._reload();
+      const hit = this._events.some((e) => {
+        const s = (e.start && (e.start.dateTime || e.start.date)) || "";
+        return e.summary === event.summary && String(s).slice(0, 10) === startDay;
+      });
+      if (hit) return true;
+      await new Promise((r) => setTimeout(r, 800));
+    }
+    return false;
   }
 
   async _delete() {
