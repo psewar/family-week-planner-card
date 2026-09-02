@@ -72,8 +72,10 @@ icons:                        # optional, token -> emoji (case-insensitive match
 The add/edit dialog uses no native pickers or dropdowns (they are not touch-scrollable on some
 kiosk setups and never trigger an on-screen keyboard): person and icon are chips, the date is a
 row of weekday chips (plus ± one day), and start/end open **iOS-style scroll wheels** (hour 0–23,
-minutes in 5-minute steps, snapping to the highlighted centre row). Changing the start keeps the
-duration (end follows).
+minutes in 5-minute steps, snapping to the highlighted centre row). The wheels scroll natively
+(touch, mouse wheel) and also support **drag-to-scroll and tap-to-select** for mouse pointers —
+which covers kiosks whose compositor delivers touch as emulated mouse input. Changing the start
+keeps the duration (end follows).
 
 ### Drag & drop options
 
@@ -81,7 +83,7 @@ duration (end follows).
 drag: true                    # optional, default true — long-press/drag events to move them
 drop_hours: [6, 22]           # optional, hour range shown in the drop-time panel
 drop_minutes_delay: 1600      # optional, ms to rest on an hour row before the minutes flyout opens
-drop_minute_step: 10          # optional, minute step of the flyout (10 → :00 :10 … :50)
+drop_minute_step: 5           # optional, minute step of the flyout (5 → :00 :05 … :55)
 ```
 
 While dragging, the upper/lower half of an hour row picks :00/:30. Rest on the hour for
