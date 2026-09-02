@@ -668,7 +668,7 @@ var e5 = e4(class extends i5 {
 });
 
 // src/family-week-planner-card.js
-var CARD_VERSION = "0.3.0";
+var CARD_VERSION = "0.4.0";
 var WEEKDAYS = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"];
 var DEFAULT_PERSONS = [
   { key: "Familie", color: "126,87,194", border: "#7e57c2", text: "#c9b3f0", alpha: 0.13 },
@@ -750,6 +750,7 @@ var FamilyWeekPlannerCard = class extends i4 {
   }
   disconnectedCallback() {
     window.removeEventListener("keydown", this._onKey);
+    this._endDrag();
     super.disconnectedCallback();
   }
   setConfig(config) {
@@ -902,6 +903,7 @@ var FamilyWeekPlannerCard = class extends i4 {
       end: this.config.default_end,
       uid: null,
       recurrence_id: null,
+      pick: null,
       saving: false,
       error: ""
     };
@@ -926,6 +928,7 @@ var FamilyWeekPlannerCard = class extends i4 {
       uid: raw.uid,
       recurrence_id: raw.recurrence_id || null,
       recurring: !!raw.recurrence_id || !!raw.rrule,
+      pick: null,
       saving: false,
       error: ""
     };
@@ -1043,7 +1046,7 @@ var FamilyWeekPlannerCard = class extends i4 {
   _evPointerDown(e6, it, el) {
     if (!this.config.drag || this._dialog) return;
     if (e6.button !== void 0 && e6.button !== 0) return;
-    this._clearPress();
+    if (this._drag || this._pending) this._endDrag();
     const r4 = el.getBoundingClientRect();
     const p3 = {
       item: it,
@@ -1062,6 +1065,7 @@ var FamilyWeekPlannerCard = class extends i4 {
       panelRect: null
     };
     this._pending = p3;
+    this._attachWin();
     if (e6.pointerType !== "mouse") {
       this._pressTimer = setTimeout(() => {
         if (this._pending === p3) this._lift();
@@ -1074,56 +1078,71 @@ var FamilyWeekPlannerCard = class extends i4 {
       this._pressTimer = null;
     }
   }
+  _attachWin() {
+    if (this._winAttached) return;
+    this._winAttached = true;
+    this._onWinMove = (e6) => this._evPointerMove(e6);
+    this._onWinUp = (e6) => this._evPointerUp(e6);
+    this._onWinCancel = () => this._evPointerCancel();
+    window.addEventListener("pointermove", this._onWinMove, { capture: true, passive: false });
+    window.addEventListener("pointerup", this._onWinUp, { capture: true });
+    window.addEventListener("pointercancel", this._onWinCancel, { capture: true });
+    window.addEventListener("blur", this._onWinCancel);
+  }
+  _detachWin() {
+    if (!this._winAttached) return;
+    this._winAttached = false;
+    window.removeEventListener("pointermove", this._onWinMove, { capture: true });
+    window.removeEventListener("pointerup", this._onWinUp, { capture: true });
+    window.removeEventListener("pointercancel", this._onWinCancel, { capture: true });
+    window.removeEventListener("blur", this._onWinCancel);
+  }
+  _endDrag() {
+    this._clearPress();
+    this._pending = null;
+    this._drag = null;
+    this._detachWin();
+  }
   _lift() {
     const p3 = this._pending;
     if (!p3) return;
     this._clearPress();
-    try {
-      p3.el.setPointerCapture(p3.pointerId);
-    } catch (_2) {
-    }
     this._pending = null;
     this._drag = { ...p3 };
     this._updateDragTarget(p3.x, p3.y);
   }
   _evPointerMove(e6) {
-    const p3 = this._pending;
-    if (p3 && !this._drag) {
+    const cur = this._drag || this._pending;
+    if (!cur || e6.pointerId !== cur.pointerId) return;
+    if (!this._drag) {
+      const p3 = cur;
       p3.x = e6.clientX;
       p3.y = e6.clientY;
       const moved = Math.hypot(e6.clientX - p3.startX, e6.clientY - p3.startY);
       if (p3.type === "mouse") {
         if (moved > 8) this._lift();
       } else if (moved > 12) {
-        this._clearPress();
-        this._pending = null;
+        this._endDrag();
       }
       return;
     }
-    if (!this._drag) return;
     e6.preventDefault();
     this._drag = { ...this._drag, x: e6.clientX, y: e6.clientY };
     this._updateDragTarget(e6.clientX, e6.clientY);
   }
   _evPointerUp(e6) {
-    this._clearPress();
-    if (this._drag) {
+    const cur = this._drag || this._pending;
+    if (!cur || e6.pointerId !== cur.pointerId) return;
+    const d3 = this._drag;
+    this._endDrag();
+    if (d3) {
       e6.preventDefault();
       this._suppressClickUntil = Date.now() + 500;
-      const d3 = this._drag;
-      this._drag = null;
-      try {
-        d3.el.releasePointerCapture(d3.pointerId);
-      } catch (_2) {
-      }
       if (d3.target) this._performDrop(d3);
     }
-    this._pending = null;
   }
   _evPointerCancel() {
-    this._clearPress();
-    this._pending = null;
-    this._drag = null;
+    this._endDrag();
   }
   _updateDragTarget(x2, y3) {
     const d3 = this._drag;
@@ -1325,9 +1344,6 @@ var FamilyWeekPlannerCard = class extends i4 {
           (it) => b2`<div
                           class=${e5({ ev: true, lifted: this._isLifted(it) })}
                           @pointerdown=${(e6) => this._evPointerDown(e6, it, e6.currentTarget)}
-                          @pointermove=${(e6) => this._evPointerMove(e6)}
-                          @pointerup=${(e6) => this._evPointerUp(e6)}
-                          @pointercancel=${() => this._evPointerCancel()}
                           @dragstart=${(e6) => e6.preventDefault()}
                           @contextmenu=${(e6) => e6.preventDefault()}
                           @click=${(e6) => {
@@ -1413,35 +1429,111 @@ var FamilyWeekPlannerCard = class extends i4 {
       </div>
     </div>`;
   }
+  /* ---------- touch-native dialog controls (no native pickers/popups) ---------- */
+  _dateLabel(ymdStr) {
+    const d3 = parseDate(ymdStr);
+    return `${WEEKDAYS[(d3.getDay() + 6) % 7].slice(0, 2)} ${fmtDM(d3)}${d3.getFullYear()}`;
+  }
+  _shiftDate(n5) {
+    this._set("date", ymd(addDays(parseDate(this._dialog.date), n5)));
+  }
+  _setStart(h3, m2) {
+    const d3 = this._dialog;
+    const toMin = (s4) => {
+      const [hh, mm] = String(s4 || "0:0").split(":").map(Number);
+      return hh * 60 + mm;
+    };
+    const tm = (mins) => `${pad(Math.floor(mins / 60))}:${pad(mins % 60)}`;
+    let dur = toMin(d3.end) - toMin(d3.start);
+    if (!(dur > 0)) dur = 60;
+    const ns = h3 * 60 + m2;
+    let ne = Math.min(ns + dur, 23 * 60 + 45);
+    if (ne <= ns) ne = Math.min(ns + 15, 23 * 60 + 45);
+    this._dialog = { ...d3, start: tm(ns), end: tm(ne), error: "" };
+  }
+  _setEnd(h3, m2) {
+    this._dialog = { ...this._dialog, end: `${pad(h3)}:${pad(m2)}`, error: "" };
+  }
+  _renderTimePick(field) {
+    const d3 = this._dialog;
+    const [ch, cm] = String(d3[field] || "09:00").split(":").map(Number);
+    const hours = [...Array(24).keys()];
+    const mins = [0, 15, 30, 45];
+    const set = (h3, m2) => field === "start" ? this._setStart(h3, m2) : this._setEnd(h3, m2);
+    return b2`<div class="tpick">
+      <div class="chips hours">
+        ${hours.map((h3) => b2`<button class="chip ${h3 === ch ? "on" : ""}" @click=${() => set(h3, cm)}>${pad(h3)}</button>`)}
+      </div>
+      <div class="chips mins">
+        ${mins.map(
+      (m2) => b2`<button
+            class="chip ${m2 === cm ? "on" : ""}"
+            @click=${() => {
+        set(ch, m2);
+        this._set("pick", null);
+      }}
+          >:${pad(m2)}</button>`
+    )}
+      </div>
+    </div>`;
+  }
+  _renderDatePick() {
+    const d3 = this._dialog;
+    const days = [...Array(7)].map((_2, i7) => addDays(this._weekStart, i7));
+    return b2`<div class="fld">
+      <span class="lbl">Datum <b class="val">${this._dateLabel(d3.date)}</b></span>
+      <div class="daterow">
+        <button class="chip nav" @click=${() => this._shiftDate(-1)} title="Ein Tag zurück">‹</button>
+        ${days.map(
+      (day, i7) => b2`<button class="chip day ${ymd(day) === d3.date ? "on" : ""}" @click=${() => this._set("date", ymd(day))}>
+            ${WEEKDAYS[i7].slice(0, 2)}<small>${fmtDM(day)}</small>
+          </button>`
+    )}
+        <button class="chip nav" @click=${() => this._shiftDate(1)} title="Ein Tag vor">›</button>
+      </div>
+    </div>`;
+  }
   _renderDialog() {
     const d3 = this._dialog;
     const persons = this._persons();
-    const iconKeys = Object.keys(this._icons());
+    const icons = this._icons();
+    const iconKeys = Object.keys(icons);
     return b2`
       <div class="overlay" @click=${this._onOverlayClick}>
-        <div class="modal ${this._kbEnabled() ? "wide" : ""}" @click=${(e6) => e6.stopPropagation()}>
+        <div class="modal wide" @click=${(e6) => e6.stopPropagation()}>
           <div class="mhead">${d3.mode === "create" ? "Neuer Termin" : "Termin bearbeiten"}</div>
           ${d3.recurring ? b2`<div class="note">Serientermin – Änderungen betreffen diesen Termin.</div>` : ""}
           ${d3.error ? b2`<div class="err">${d3.error}</div>` : ""}
 
-          <label class="fld"
-            >Person
-            <select @change=${(e6) => this._set("person", e6.target.value)}>
+          <div class="fld">
+            <span class="lbl">Person</span>
+            <div class="chips">
               ${persons.map(
-      (p3) => b2`<option value=${p3.key} ?selected=${p3.key === d3.person}>${p3.label || p3.key}</option>`
+      (p3) => b2`<button
+                  class="chip person ${p3.key === d3.person ? "on" : ""}"
+                  style=${o5({
+        borderColor: p3.border,
+        background: p3.key === d3.person ? `rgba(${p3.color},0.6)` : `rgba(${p3.color},0.16)`
+      })}
+                  @click=${() => this._set("person", p3.key)}
+                >
+                  ${p3.label || p3.key}
+                </button>`
     )}
-            </select>
-          </label>
+            </div>
+          </div>
 
-          <label class="fld"
-            >Icon
-            <select @change=${(e6) => this._set("iconKey", e6.target.value)}>
-              <option value="" ?selected=${!d3.iconKey}>(kein)</option>
+          <div class="fld">
+            <span class="lbl">Icon</span>
+            <div class="chips icons">
+              <button class="chip ${!d3.iconKey ? "on" : ""}" @click=${() => this._set("iconKey", "")}>–<small>kein</small></button>
               ${iconKeys.map(
-      (k2) => b2`<option value=${k2} ?selected=${k2 === d3.iconKey}>${this._icons()[k2]} ${k2}</option>`
+      (k2) => b2`<button class="chip icon ${k2 === d3.iconKey ? "on" : ""}" @click=${() => this._set("iconKey", k2)}>
+                  ${icons[k2]}<small>${k2}</small>
+                </button>`
     )}
-            </select>
-          </label>
+            </div>
+          </div>
 
           <label class="fld"
             >Titel
@@ -1453,26 +1545,28 @@ var FamilyWeekPlannerCard = class extends i4 {
             />
           </label>
 
-          <label class="chk">
-            <input type="checkbox" .checked=${d3.allday} @change=${(e6) => this._set("allday", e6.target.checked)} />
-            Ganztags
-          </label>
+          ${this._renderDatePick()}
 
-          <label class="fld"
-            >Datum
-            <input type="date" .value=${d3.date} @input=${(e6) => this._set("date", e6.target.value)} />
-          </label>
-
-          ${d3.allday ? "" : b2`<div class="times">
-                <label class="fld"
-                  >Von
-                  <input type="time" .value=${d3.start} @input=${(e6) => this._set("start", e6.target.value)} />
-                </label>
-                <label class="fld"
-                  >Bis
-                  <input type="time" .value=${d3.end} @input=${(e6) => this._set("end", e6.target.value)} />
-                </label>
-              </div>`}
+          <div class="fld">
+            <div class="times">
+              <button class="chip toggle ${d3.allday ? "on" : ""}" @click=${() => this._set("allday", !d3.allday)}>
+                ${d3.allday ? "\u2611" : "\u2610"} Ganztags
+              </button>
+              ${d3.allday ? "" : b2`<button
+                      class="chip time ${d3.pick === "start" ? "on" : ""}"
+                      @click=${() => this._set("pick", d3.pick === "start" ? null : "start")}
+                    >
+                      <small>Von</small>${d3.start}
+                    </button>
+                    <button
+                      class="chip time ${d3.pick === "end" ? "on" : ""}"
+                      @click=${() => this._set("pick", d3.pick === "end" ? null : "end")}
+                    >
+                      <small>Bis</small>${d3.end}
+                    </button>`}
+            </div>
+            ${!d3.allday && d3.pick ? this._renderTimePick(d3.pick) : ""}
+          </div>
 
           ${this._kbEnabled() ? this._renderKeyboard() : ""}
 
@@ -1640,7 +1734,7 @@ __publicField(FamilyWeekPlannerCard, "styles", i`
       border: 1px solid rgba(255, 255, 255, 0.14);
       border-radius: 14px;
       padding: 18px 18px 14px;
-      width: min(92vw, 380px);
+      width: min(96vw, 640px);
       max-height: 88vh;
       overflow-y: auto;
       box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
@@ -1874,6 +1968,117 @@ __publicField(FamilyWeekPlannerCard, "styles", i`
     .toast.err {
       border-color: rgba(211, 47, 47, 0.6);
       color: #ff9a9a;
+    }
+
+    /* ---- touch-native dialog controls (chips instead of native pickers) ---- */
+    .lbl {
+      display: block;
+      font-size: 13px;
+      opacity: 0.9;
+      margin-bottom: 6px;
+    }
+    .lbl .val {
+      margin-left: 8px;
+      font-size: 14px;
+      opacity: 1;
+    }
+    .chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+    .chip {
+      min-height: 44px;
+      padding: 0 12px;
+      border-radius: 10px;
+      border: 1px solid rgba(255, 255, 255, 0.22);
+      background: rgba(255, 255, 255, 0.08);
+      color: inherit;
+      font-size: 15px;
+      cursor: pointer;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      line-height: 1.15;
+      -webkit-tap-highlight-color: rgba(255, 255, 255, 0.2);
+    }
+    .chip small {
+      font-size: 11px;
+      opacity: 0.75;
+      font-weight: normal;
+    }
+    .chip.on {
+      background: var(--primary-color, #03a9f4);
+      border-color: var(--primary-color, #03a9f4);
+      color: #fff;
+    }
+    .chip.on small {
+      opacity: 0.9;
+    }
+    .chip.person.on {
+      color: #fff;
+      font-weight: 600;
+    }
+    .chips.icons {
+      display: grid;
+      grid-template-columns: repeat(6, 1fr);
+    }
+    .chips.icons .chip {
+      padding: 0 6px;
+      min-width: 0;
+    }
+    .chips.icons .chip.icon {
+      font-size: 20px;
+    }
+    .daterow {
+      display: flex;
+      gap: 6px;
+      align-items: stretch;
+    }
+    .daterow .chip.day {
+      flex: 1;
+      min-width: 0;
+      padding: 0 4px;
+      font-size: 14px;
+    }
+    .daterow .chip.nav {
+      flex: 0 0 40px;
+      padding: 0;
+      font-size: 22px;
+    }
+    .chip.toggle {
+      flex: 0 0 auto;
+      padding: 0 14px;
+    }
+    .chip.time {
+      flex: 1;
+      font-size: 20px;
+      font-weight: 600;
+    }
+    .tpick {
+      margin-top: 8px;
+      padding: 10px;
+      border-radius: 12px;
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+    }
+    .chips.hours {
+      display: grid;
+      grid-template-columns: repeat(12, 1fr);
+    }
+    .chips.hours .chip {
+      min-height: 40px;
+      padding: 0;
+      font-size: 14px;
+      min-width: 0;
+    }
+    .chips.mins {
+      margin-top: 8px;
+    }
+    .chips.mins .chip {
+      flex: 1;
+      min-height: 42px;
     }
   `);
 customElements.define("family-week-planner-card", FamilyWeekPlannerCard);

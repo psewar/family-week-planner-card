@@ -19,7 +19,7 @@ import { LitElement, html, css } from "lit";
 import { styleMap } from "lit/directives/style-map.js";
 import { classMap } from "lit/directives/class-map.js";
 
-const CARD_VERSION = "0.3.0";
+const CARD_VERSION = "0.4.0";
 
 const WEEKDAYS = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"];
 
@@ -109,6 +109,7 @@ class FamilyWeekPlannerCard extends LitElement {
   }
   disconnectedCallback() {
     window.removeEventListener("keydown", this._onKey);
+    this._endDrag();
     super.disconnectedCallback();
   }
 
@@ -274,6 +275,7 @@ class FamilyWeekPlannerCard extends LitElement {
       end: this.config.default_end,
       uid: null,
       recurrence_id: null,
+      pick: null,
       saving: false,
       error: "",
     };
@@ -298,6 +300,7 @@ class FamilyWeekPlannerCard extends LitElement {
       uid: raw.uid,
       recurrence_id: raw.recurrence_id || null,
       recurring: !!raw.recurrence_id || !!raw.rrule,
+      pick: null,
       saving: false,
       error: "",
     };
@@ -426,7 +429,7 @@ class FamilyWeekPlannerCard extends LitElement {
   _evPointerDown(e, it, el) {
     if (!this.config.drag || this._dialog) return;
     if (e.button !== undefined && e.button !== 0) return;
-    this._clearPress();
+    if (this._drag || this._pending) this._endDrag(); // stale state from a lost pointer -> reset
     const r = el.getBoundingClientRect();
     const p = {
       item: it,
@@ -445,6 +448,9 @@ class FamilyWeekPlannerCard extends LitElement {
       panelRect: null,
     };
     this._pending = p;
+    // Listen on window for the rest of the gesture: pointer capture is not reliable for
+    // touch on every compositor, and a release outside the card must still end the drag.
+    this._attachWin();
     if (e.pointerType !== "mouse") {
       // touch/pen: long-press lifts the card (a quick tap still opens the editor)
       this._pressTimer = setTimeout(() => {
@@ -458,58 +464,71 @@ class FamilyWeekPlannerCard extends LitElement {
       this._pressTimer = null;
     }
   }
+  _attachWin() {
+    if (this._winAttached) return;
+    this._winAttached = true;
+    this._onWinMove = (e) => this._evPointerMove(e);
+    this._onWinUp = (e) => this._evPointerUp(e);
+    this._onWinCancel = () => this._evPointerCancel();
+    window.addEventListener("pointermove", this._onWinMove, { capture: true, passive: false });
+    window.addEventListener("pointerup", this._onWinUp, { capture: true });
+    window.addEventListener("pointercancel", this._onWinCancel, { capture: true });
+    window.addEventListener("blur", this._onWinCancel);
+  }
+  _detachWin() {
+    if (!this._winAttached) return;
+    this._winAttached = false;
+    window.removeEventListener("pointermove", this._onWinMove, { capture: true });
+    window.removeEventListener("pointerup", this._onWinUp, { capture: true });
+    window.removeEventListener("pointercancel", this._onWinCancel, { capture: true });
+    window.removeEventListener("blur", this._onWinCancel);
+  }
+  _endDrag() {
+    this._clearPress();
+    this._pending = null;
+    this._drag = null;
+    this._detachWin();
+  }
   _lift() {
     const p = this._pending;
     if (!p) return;
     this._clearPress();
-    try {
-      p.el.setPointerCapture(p.pointerId);
-    } catch (_) {
-      /* ignore */
-    }
     this._pending = null;
     this._drag = { ...p };
     this._updateDragTarget(p.x, p.y);
   }
   _evPointerMove(e) {
-    const p = this._pending;
-    if (p && !this._drag) {
+    const cur = this._drag || this._pending;
+    if (!cur || e.pointerId !== cur.pointerId) return;
+    if (!this._drag) {
+      const p = cur;
       p.x = e.clientX;
       p.y = e.clientY;
       const moved = Math.hypot(e.clientX - p.startX, e.clientY - p.startY);
       if (p.type === "mouse") {
         if (moved > 8) this._lift();
       } else if (moved > 12) {
-        this._clearPress(); // finger slipped before the long-press -> no drag
-        this._pending = null;
+        this._endDrag(); // finger slipped before the long-press -> no drag
       }
       return;
     }
-    if (!this._drag) return;
     e.preventDefault();
     this._drag = { ...this._drag, x: e.clientX, y: e.clientY };
     this._updateDragTarget(e.clientX, e.clientY);
   }
   _evPointerUp(e) {
-    this._clearPress();
-    if (this._drag) {
+    const cur = this._drag || this._pending;
+    if (!cur || e.pointerId !== cur.pointerId) return;
+    const d = this._drag;
+    this._endDrag(); // always clean up, wherever the pointer was released
+    if (d) {
       e.preventDefault();
       this._suppressClickUntil = Date.now() + 500;
-      const d = this._drag;
-      this._drag = null;
-      try {
-        d.el.releasePointerCapture(d.pointerId);
-      } catch (_) {
-        /* ignore */
-      }
       if (d.target) this._performDrop(d);
     }
-    this._pending = null;
   }
   _evPointerCancel() {
-    this._clearPress();
-    this._pending = null;
-    this._drag = null;
+    this._endDrag();
   }
 
   _updateDragTarget(x, y) {
@@ -728,9 +747,6 @@ class FamilyWeekPlannerCard extends LitElement {
                         (it) => html`<div
                           class=${classMap({ ev: true, lifted: this._isLifted(it) })}
                           @pointerdown=${(e) => this._evPointerDown(e, it, e.currentTarget)}
-                          @pointermove=${(e) => this._evPointerMove(e)}
-                          @pointerup=${(e) => this._evPointerUp(e)}
-                          @pointercancel=${() => this._evPointerCancel()}
                           @dragstart=${(e) => e.preventDefault()}
                           @contextmenu=${(e) => e.preventDefault()}
                           @click=${(e) => {
@@ -821,35 +837,113 @@ class FamilyWeekPlannerCard extends LitElement {
     </div>`;
   }
 
+  /* ---------- touch-native dialog controls (no native pickers/popups) ---------- */
+  _dateLabel(ymdStr) {
+    const d = parseDate(ymdStr);
+    return `${WEEKDAYS[(d.getDay() + 6) % 7].slice(0, 2)} ${fmtDM(d)}${d.getFullYear()}`;
+  }
+  _shiftDate(n) {
+    this._set("date", ymd(addDays(parseDate(this._dialog.date), n)));
+  }
+  _setStart(h, m) {
+    // Move the start; keep the duration (end follows), clamped to the same day.
+    const d = this._dialog;
+    const toMin = (s) => {
+      const [hh, mm] = String(s || "0:0").split(":").map(Number);
+      return hh * 60 + mm;
+    };
+    const tm = (mins) => `${pad(Math.floor(mins / 60))}:${pad(mins % 60)}`;
+    let dur = toMin(d.end) - toMin(d.start);
+    if (!(dur > 0)) dur = 60;
+    const ns = h * 60 + m;
+    let ne = Math.min(ns + dur, 23 * 60 + 45);
+    if (ne <= ns) ne = Math.min(ns + 15, 23 * 60 + 45);
+    this._dialog = { ...d, start: tm(ns), end: tm(ne), error: "" };
+  }
+  _setEnd(h, m) {
+    this._dialog = { ...this._dialog, end: `${pad(h)}:${pad(m)}`, error: "" };
+  }
+  _renderTimePick(field) {
+    const d = this._dialog;
+    const [ch, cm] = String(d[field] || "09:00").split(":").map(Number);
+    const hours = [...Array(24).keys()];
+    const mins = [0, 15, 30, 45];
+    const set = (h, m) => (field === "start" ? this._setStart(h, m) : this._setEnd(h, m));
+    return html`<div class="tpick">
+      <div class="chips hours">
+        ${hours.map((h) => html`<button class="chip ${h === ch ? "on" : ""}" @click=${() => set(h, cm)}>${pad(h)}</button>`)}
+      </div>
+      <div class="chips mins">
+        ${mins.map(
+          (m) => html`<button
+            class="chip ${m === cm ? "on" : ""}"
+            @click=${() => {
+              set(ch, m);
+              this._set("pick", null);
+            }}
+          >:${pad(m)}</button>`
+        )}
+      </div>
+    </div>`;
+  }
+  _renderDatePick() {
+    const d = this._dialog;
+    const days = [...Array(7)].map((_, i) => addDays(this._weekStart, i));
+    return html`<div class="fld">
+      <span class="lbl">Datum <b class="val">${this._dateLabel(d.date)}</b></span>
+      <div class="daterow">
+        <button class="chip nav" @click=${() => this._shiftDate(-1)} title="Ein Tag zurück">‹</button>
+        ${days.map(
+          (day, i) => html`<button class="chip day ${ymd(day) === d.date ? "on" : ""}" @click=${() => this._set("date", ymd(day))}>
+            ${WEEKDAYS[i].slice(0, 2)}<small>${fmtDM(day)}</small>
+          </button>`
+        )}
+        <button class="chip nav" @click=${() => this._shiftDate(1)} title="Ein Tag vor">›</button>
+      </div>
+    </div>`;
+  }
+
   _renderDialog() {
     const d = this._dialog;
     const persons = this._persons();
-    const iconKeys = Object.keys(this._icons());
+    const icons = this._icons();
+    const iconKeys = Object.keys(icons);
     return html`
       <div class="overlay" @click=${this._onOverlayClick}>
-        <div class="modal ${this._kbEnabled() ? "wide" : ""}" @click=${(e) => e.stopPropagation()}>
+        <div class="modal wide" @click=${(e) => e.stopPropagation()}>
           <div class="mhead">${d.mode === "create" ? "Neuer Termin" : "Termin bearbeiten"}</div>
           ${d.recurring ? html`<div class="note">Serientermin – Änderungen betreffen diesen Termin.</div>` : ""}
           ${d.error ? html`<div class="err">${d.error}</div>` : ""}
 
-          <label class="fld"
-            >Person
-            <select @change=${(e) => this._set("person", e.target.value)}>
+          <div class="fld">
+            <span class="lbl">Person</span>
+            <div class="chips">
               ${persons.map(
-                (p) => html`<option value=${p.key} ?selected=${p.key === d.person}>${p.label || p.key}</option>`
+                (p) => html`<button
+                  class="chip person ${p.key === d.person ? "on" : ""}"
+                  style=${styleMap({
+                    borderColor: p.border,
+                    background: p.key === d.person ? `rgba(${p.color},0.6)` : `rgba(${p.color},0.16)`,
+                  })}
+                  @click=${() => this._set("person", p.key)}
+                >
+                  ${p.label || p.key}
+                </button>`
               )}
-            </select>
-          </label>
+            </div>
+          </div>
 
-          <label class="fld"
-            >Icon
-            <select @change=${(e) => this._set("iconKey", e.target.value)}>
-              <option value="" ?selected=${!d.iconKey}>(kein)</option>
+          <div class="fld">
+            <span class="lbl">Icon</span>
+            <div class="chips icons">
+              <button class="chip ${!d.iconKey ? "on" : ""}" @click=${() => this._set("iconKey", "")}>–<small>kein</small></button>
               ${iconKeys.map(
-                (k) => html`<option value=${k} ?selected=${k === d.iconKey}>${this._icons()[k]} ${k}</option>`
+                (k) => html`<button class="chip icon ${k === d.iconKey ? "on" : ""}" @click=${() => this._set("iconKey", k)}>
+                  ${icons[k]}<small>${k}</small>
+                </button>`
               )}
-            </select>
-          </label>
+            </div>
+          </div>
 
           <label class="fld"
             >Titel
@@ -861,28 +955,30 @@ class FamilyWeekPlannerCard extends LitElement {
             />
           </label>
 
-          <label class="chk">
-            <input type="checkbox" .checked=${d.allday} @change=${(e) => this._set("allday", e.target.checked)} />
-            Ganztags
-          </label>
+          ${this._renderDatePick()}
 
-          <label class="fld"
-            >Datum
-            <input type="date" .value=${d.date} @input=${(e) => this._set("date", e.target.value)} />
-          </label>
-
-          ${d.allday
-            ? ""
-            : html`<div class="times">
-                <label class="fld"
-                  >Von
-                  <input type="time" .value=${d.start} @input=${(e) => this._set("start", e.target.value)} />
-                </label>
-                <label class="fld"
-                  >Bis
-                  <input type="time" .value=${d.end} @input=${(e) => this._set("end", e.target.value)} />
-                </label>
-              </div>`}
+          <div class="fld">
+            <div class="times">
+              <button class="chip toggle ${d.allday ? "on" : ""}" @click=${() => this._set("allday", !d.allday)}>
+                ${d.allday ? "☑" : "☐"} Ganztags
+              </button>
+              ${d.allday
+                ? ""
+                : html`<button
+                      class="chip time ${d.pick === "start" ? "on" : ""}"
+                      @click=${() => this._set("pick", d.pick === "start" ? null : "start")}
+                    >
+                      <small>Von</small>${d.start}
+                    </button>
+                    <button
+                      class="chip time ${d.pick === "end" ? "on" : ""}"
+                      @click=${() => this._set("pick", d.pick === "end" ? null : "end")}
+                    >
+                      <small>Bis</small>${d.end}
+                    </button>`}
+            </div>
+            ${!d.allday && d.pick ? this._renderTimePick(d.pick) : ""}
+          </div>
 
           ${this._kbEnabled() ? this._renderKeyboard() : ""}
 
@@ -1043,7 +1139,7 @@ class FamilyWeekPlannerCard extends LitElement {
       border: 1px solid rgba(255, 255, 255, 0.14);
       border-radius: 14px;
       padding: 18px 18px 14px;
-      width: min(92vw, 380px);
+      width: min(96vw, 640px);
       max-height: 88vh;
       overflow-y: auto;
       box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
@@ -1277,6 +1373,117 @@ class FamilyWeekPlannerCard extends LitElement {
     .toast.err {
       border-color: rgba(211, 47, 47, 0.6);
       color: #ff9a9a;
+    }
+
+    /* ---- touch-native dialog controls (chips instead of native pickers) ---- */
+    .lbl {
+      display: block;
+      font-size: 13px;
+      opacity: 0.9;
+      margin-bottom: 6px;
+    }
+    .lbl .val {
+      margin-left: 8px;
+      font-size: 14px;
+      opacity: 1;
+    }
+    .chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+    .chip {
+      min-height: 44px;
+      padding: 0 12px;
+      border-radius: 10px;
+      border: 1px solid rgba(255, 255, 255, 0.22);
+      background: rgba(255, 255, 255, 0.08);
+      color: inherit;
+      font-size: 15px;
+      cursor: pointer;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      line-height: 1.15;
+      -webkit-tap-highlight-color: rgba(255, 255, 255, 0.2);
+    }
+    .chip small {
+      font-size: 11px;
+      opacity: 0.75;
+      font-weight: normal;
+    }
+    .chip.on {
+      background: var(--primary-color, #03a9f4);
+      border-color: var(--primary-color, #03a9f4);
+      color: #fff;
+    }
+    .chip.on small {
+      opacity: 0.9;
+    }
+    .chip.person.on {
+      color: #fff;
+      font-weight: 600;
+    }
+    .chips.icons {
+      display: grid;
+      grid-template-columns: repeat(6, 1fr);
+    }
+    .chips.icons .chip {
+      padding: 0 6px;
+      min-width: 0;
+    }
+    .chips.icons .chip.icon {
+      font-size: 20px;
+    }
+    .daterow {
+      display: flex;
+      gap: 6px;
+      align-items: stretch;
+    }
+    .daterow .chip.day {
+      flex: 1;
+      min-width: 0;
+      padding: 0 4px;
+      font-size: 14px;
+    }
+    .daterow .chip.nav {
+      flex: 0 0 40px;
+      padding: 0;
+      font-size: 22px;
+    }
+    .chip.toggle {
+      flex: 0 0 auto;
+      padding: 0 14px;
+    }
+    .chip.time {
+      flex: 1;
+      font-size: 20px;
+      font-weight: 600;
+    }
+    .tpick {
+      margin-top: 8px;
+      padding: 10px;
+      border-radius: 12px;
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+    }
+    .chips.hours {
+      display: grid;
+      grid-template-columns: repeat(12, 1fr);
+    }
+    .chips.hours .chip {
+      min-height: 40px;
+      padding: 0;
+      font-size: 14px;
+      min-width: 0;
+    }
+    .chips.mins {
+      margin-top: 8px;
+    }
+    .chips.mins .chip {
+      flex: 1;
+      min-height: 42px;
     }
   `;
 }

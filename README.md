@@ -67,6 +67,13 @@ icons:                        # optional, token -> emoji (case-insensitive match
 - `label` — optional display name (defaults to `key`).
 - `color` — `"r,g,b"` used as a translucent row background; `border`/`text` accent the row label.
 
+### Touch-native dialog
+
+The add/edit dialog uses no native pickers or dropdowns (they are not touch-scrollable on some
+kiosk setups and never trigger an on-screen keyboard): person and icon are chips, the date is a
+row of weekday chips (plus ± one day), and start/end open an hour × minute grid (00/15/30/45).
+Changing the start keeps the duration (end follows).
+
 ### Drag & drop options
 
 ```yaml
