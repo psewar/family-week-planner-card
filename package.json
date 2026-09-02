@@ -1,6 +1,6 @@
 {
   "name": "family-week-planner-card",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Editable person-by-day family week planner card for Home Assistant, backed by a single calendar entity with Person|Icon: Title events.",
   "type": "module",
   "scripts": {

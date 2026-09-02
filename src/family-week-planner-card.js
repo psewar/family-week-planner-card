@@ -19,7 +19,7 @@ import { LitElement, html, css } from "lit";
 import { styleMap } from "lit/directives/style-map.js";
 import { classMap } from "lit/directives/class-map.js";
 
-const CARD_VERSION = "0.4.0";
+const CARD_VERSION = "0.5.0";
 
 const WEEKDAYS = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"];
 
@@ -134,6 +134,9 @@ class FamilyWeekPlannerCard extends LitElement {
       drag: config.drag !== false,
       // Hour range offered in the drop-time panel [first, last].
       drop_hours: Array.isArray(config.drop_hours) && config.drop_hours.length === 2 ? config.drop_hours : [6, 22],
+      // While dragging: rest on an hour row this long (ms) to open the minutes flyout (step in minutes).
+      drop_minutes_delay: config.drop_minutes_delay ?? 1600,
+      drop_minute_step: config.drop_minute_step ?? 10,
     };
   }
 
@@ -485,6 +488,7 @@ class FamilyWeekPlannerCard extends LitElement {
   }
   _endDrag() {
     this._clearPress();
+    this._flyLeave();
     this._pending = null;
     this._drag = null;
     this._detachWin();
@@ -536,18 +540,34 @@ class FamilyWeekPlannerCard extends LitElement {
     if (!d) return;
     const el = this.shadowRoot.elementFromPoint(x, y);
     const closest = (sel) => (el && el.closest ? el.closest(sel) : null);
-    let { target, hoverT, panelRect } = d;
+    let { target, hoverT, panelRect, flyHour } = d;
     const row = closest(".drow");
     if (row) {
       const t = row.dataset.t;
-      if (t === "keep" || t === "allday") hoverT = t;
-      else {
+      if (row.classList.contains("fly")) {
+        hoverT = t; // exact HH:MM from the minutes flyout
+      } else if (t === "keep" || t === "allday") {
+        hoverT = t;
+        this._flyLeave();
+        flyHour = null;
+      } else {
         const rr = row.getBoundingClientRect();
         hoverT = `${t}:${y > rr.top + rr.height / 2 ? "30" : "00"}`;
+        if (t !== this._flyHoverHour) {
+          // entered a (different) hour row: restart the rest timer for the minutes flyout
+          this._flyLeave();
+          if (flyHour && flyHour !== t) flyHour = null;
+          this._flyHoverHour = t;
+          this._flyTimer = setTimeout(() => {
+            if (this._drag && this._flyHoverHour === t) this._drag = { ...this._drag, flyHour: t };
+          }, this.config.drop_minutes_delay);
+        }
       }
     } else if (closest(".droppanel")) {
       // over panel chrome (borders/gaps): keep the last choice
     } else {
+      this._flyLeave();
+      flyHour = null;
       const td = closest("td.cell");
       if (td) {
         const person = td.dataset.person;
@@ -563,7 +583,14 @@ class FamilyWeekPlannerCard extends LitElement {
         hoverT = null;
       }
     }
-    this._drag = { ...d, target, hoverT, panelRect };
+    this._drag = { ...d, target, hoverT, panelRect, flyHour };
+  }
+  _flyLeave() {
+    if (this._flyTimer) {
+      clearTimeout(this._flyTimer);
+      this._flyTimer = null;
+    }
+    this._flyHoverHour = null;
   }
 
   async _performDrop(d) {
@@ -660,7 +687,8 @@ class FamilyWeekPlannerCard extends LitElement {
     const [h0, h1] = this.config.drop_hours;
     const hours = [];
     for (let h = h0; h <= h1; h++) hours.push(String(h).padStart(2, "0"));
-    const W = Math.max(d.panelRect.width, 190);
+    const FLYW = 104;
+    const W = Math.max(d.panelRect.width, 190) + (d.flyHour ? FLYW : 0);
     const H = 36 + 34 * (1 + hours.length);
     const vw = window.innerWidth;
     const vh = window.innerHeight;
@@ -669,17 +697,33 @@ class FamilyWeekPlannerCard extends LitElement {
     const day = addDays(this._weekStart, d.target.day);
     const person = this._persons().find((p) => p.key === d.target.person);
     const hot = (t) => d.hoverT === t || (!!d.hoverT && d.hoverT.startsWith(t + ":"));
+    // minutes flyout (after resting on an hour row): aligned with that row, kept inside the panel height
+    const step = Math.max(1, this.config.drop_minute_step);
+    const mins = [];
+    for (let m = 0; m < 60; m += step) mins.push(pad(m));
+    const flyIdx = d.flyHour ? hours.indexOf(d.flyHour) : -1;
+    const flyTop = flyIdx >= 0 ? Math.min(36 + 34 * (1 + flyIdx), Math.max(0, H - 34 * mins.length)) : 0;
     return html`<div class="droppanel" style=${styleMap({ left: `${left}px`, top: `${top}px`, width: `${W}px` })}>
-      <div class="drow head ${d.hoverT === "keep" ? "hot" : ""}" data-t="keep">
-        <span>${WEEKDAYS[d.target.day]} ${fmtDM(day)} · ${person ? person.label || person.key : ""}</span>
-        <span class="hint">Zeit behalten</span>
+      <div class="dpmain">
+        <div class="drow head ${d.hoverT === "keep" ? "hot" : ""}" data-t="keep">
+          <span>${WEEKDAYS[d.target.day]} ${fmtDM(day)} · ${person ? person.label || person.key : ""}</span>
+          <span class="hint">Zeit behalten</span>
+        </div>
+        <div class="drow allday ${hot("allday") ? "hot" : ""}" data-t="allday">Ganztags</div>
+        ${hours.map(
+          (hh) => html`<div class="drow ${d.flyHour === hh ? "open" : ""} ${hot(hh) ? "hot" : ""}" data-t=${hh}>
+            <span>${hh}:00</span>${hot(hh) ? html`<span class="sel">${d.hoverT}</span>` : d.flyHour === hh ? html`<span class="sel">›</span>` : ""}
+          </div>`
+        )}
       </div>
-      <div class="drow allday ${hot("allday") ? "hot" : ""}" data-t="allday">Ganztags</div>
-      ${hours.map(
-        (hh) => html`<div class="drow ${hot(hh) ? "hot" : ""}" data-t=${hh}>
-          <span>${hh}:00</span>${hot(hh) ? html`<span class="sel">${d.hoverT}</span>` : ""}
-        </div>`
-      )}
+      ${flyIdx >= 0
+        ? html`<div class="dpfly" style=${styleMap({ marginTop: `${flyTop}px` })}>
+            ${mins.map((mm) => {
+              const t = `${d.flyHour}:${mm}`;
+              return html`<div class="drow fly ${d.hoverT === t ? "hot" : ""}" data-t=${t}>${t}</div>`;
+            })}
+          </div>`
+        : ""}
     </div>`;
   }
 
@@ -863,28 +907,62 @@ class FamilyWeekPlannerCard extends LitElement {
   _setEnd(h, m) {
     this._dialog = { ...this._dialog, end: `${pad(h)}:${pad(m)}`, error: "" };
   }
+  // iOS-style drum pickers: scroll-snapping wheels for hour (0-23) and minute (5-min steps).
   _renderTimePick(field) {
     const d = this._dialog;
     const [ch, cm] = String(d[field] || "09:00").split(":").map(Number);
     const hours = [...Array(24).keys()];
-    const mins = [0, 15, 30, 45];
-    const set = (h, m) => (field === "start" ? this._setStart(h, m) : this._setEnd(h, m));
-    return html`<div class="tpick">
-      <div class="chips hours">
-        ${hours.map((h) => html`<button class="chip ${h === ch ? "on" : ""}" @click=${() => set(h, cm)}>${pad(h)}</button>`)}
-      </div>
-      <div class="chips mins">
-        ${mins.map(
-          (m) => html`<button
-            class="chip ${m === cm ? "on" : ""}"
-            @click=${() => {
-              set(ch, m);
-              this._set("pick", null);
-            }}
-          >:${pad(m)}</button>`
-        )}
+    const mins = [];
+    for (let m = 0; m < 60; m += 5) mins.push(m);
+    const curM = cm - (cm % 5);
+    const setH = (h) => (field === "start" ? this._setStart(h, cm) : this._setEnd(h, cm));
+    const setM = (m) => (field === "start" ? this._setStart(ch, m) : this._setEnd(ch, m));
+    const wheel = (kind, values, cur, onChange) => html`<div class="wheelwrap">
+      <div class="wheel" data-kind=${kind} @scroll=${(e) => this._wheelScroll(e, values, onChange)}>
+        <div class="wpad"></div>
+        ${values.map((v) => html`<div class="witem ${v === cur ? "on" : ""}">${pad(v)}</div>`)}
+        <div class="wpad"></div>
       </div>
     </div>`;
+    return html`<div class="tpick wheels">
+      <div class="wheelrow">
+        <span class="wlabel">${field === "start" ? "Von" : "Bis"}</span>
+        ${wheel("h", hours, ch, setH)}
+        <div class="wcolon">:</div>
+        ${wheel("m", mins, curM, setM)}
+      </div>
+      <div class="wactions"><button class="chip" @click=${() => this._set("pick", null)}>Fertig</button></div>
+    </div>`;
+  }
+  _wheelScroll(e, values, onChange) {
+    const el = e.currentTarget;
+    if (el._prog) return; // programmatic positioning, not a user scroll
+    clearTimeout(el._t);
+    el._t = setTimeout(() => {
+      const idx = Math.max(0, Math.min(values.length - 1, Math.round(el.scrollTop / 44)));
+      onChange(values[idx]);
+    }, 140);
+  }
+  updated(changed) {
+    super.updated(changed);
+    // Position the wheels once when a time picker opens (not on every re-render).
+    const pick = this._dialog && this._dialog.pick;
+    if (!pick) {
+      this._wheelKey = null;
+      return;
+    }
+    if (this._wheelKey === pick) return;
+    this._wheelKey = pick;
+    const [ch, cm] = String(this._dialog[pick] || "09:00").split(":").map(Number);
+    const pos = (kind, idx) => {
+      const el = this.shadowRoot.querySelector(`.wheel[data-kind="${kind}"]`);
+      if (!el) return;
+      el._prog = true;
+      el.scrollTop = idx * 44;
+      setTimeout(() => (el._prog = false), 250);
+    };
+    pos("h", ch);
+    pos("m", Math.floor(cm / 5));
   }
   _renderDatePick() {
     const d = this._dialog;
@@ -1468,22 +1546,99 @@ class FamilyWeekPlannerCard extends LitElement {
       background: rgba(255, 255, 255, 0.05);
       border: 1px solid rgba(255, 255, 255, 0.12);
     }
-    .chips.hours {
-      display: grid;
-      grid-template-columns: repeat(12, 1fr);
+
+    /* ---- iOS-style time wheels ---- */
+    .wheelrow {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
     }
-    .chips.hours .chip {
-      min-height: 40px;
-      padding: 0;
+    .wlabel {
       font-size: 14px;
-      min-width: 0;
+      opacity: 0.8;
+      width: 36px;
     }
-    .chips.mins {
+    .wheelwrap {
+      position: relative;
+      width: 112px;
+      height: 220px;
+      border-radius: 12px;
+      background: rgba(255, 255, 255, 0.04);
+    }
+    .wheelwrap::before {
+      content: "";
+      position: absolute;
+      left: 6px;
+      right: 6px;
+      top: 88px;
+      height: 44px;
+      border-top: 1px solid rgba(255, 255, 255, 0.35);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.35);
+      border-radius: 8px;
+      pointer-events: none;
+    }
+    .wheel {
+      height: 220px;
+      overflow-y: auto;
+      scroll-snap-type: y mandatory;
+      scrollbar-width: none;
+      -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 30%, #000 70%, transparent 100%);
+      mask-image: linear-gradient(to bottom, transparent 0, #000 30%, #000 70%, transparent 100%);
+    }
+    .wheel::-webkit-scrollbar {
+      display: none;
+    }
+    .wpad {
+      height: 88px;
+    }
+    .witem {
+      height: 44px;
+      line-height: 44px;
+      text-align: center;
+      font-size: 24px;
+      scroll-snap-align: center;
+      opacity: 0.5;
+      font-variant-numeric: tabular-nums;
+    }
+    .witem.on {
+      opacity: 1;
+      font-weight: 700;
+    }
+    .wcolon {
+      font-size: 28px;
+      font-weight: 700;
+      opacity: 0.8;
+    }
+    .wactions {
+      display: flex;
+      justify-content: flex-end;
       margin-top: 8px;
     }
-    .chips.mins .chip {
+
+    /* ---- drop panel: minutes flyout ---- */
+    .droppanel {
+      display: flex;
+      align-items: flex-start;
+    }
+    .dpmain {
       flex: 1;
-      min-height: 42px;
+      min-width: 0;
+    }
+    .dpfly {
+      width: 104px;
+      border-left: 1px solid rgba(255, 255, 255, 0.16);
+      background: rgba(255, 255, 255, 0.04);
+    }
+    .drow.fly {
+      justify-content: center;
+      font-variant-numeric: tabular-nums;
+    }
+    .drow.open {
+      background: rgba(255, 255, 255, 0.1);
+    }
+    .drow.open.hot {
+      background: var(--primary-color, #03a9f4);
     }
   `;
 }
