@@ -8,6 +8,10 @@ columns** and lets you **create, edit and delete** events directly:
 
 - **Tap an event** → edit or delete it.
 - **Tap an empty cell** → create a new event, pre-filled with that day and that row's person.
+- **Long-press (touch) or drag (mouse) an event** → it lifts and follows your finger. Over a target
+  cell a time panel opens (*keep time* · *all-day* · hourly rows, upper/lower half = :00/:30).
+  Release to move the event there; its duration is preserved. Dropping onto another person's
+  row re-assigns the event to that person. Release outside any cell (or press Esc) to cancel.
 
 All events live in **one** calendar entity. The person and an optional icon are encoded in the
 event title using the convention:
@@ -62,6 +66,25 @@ icons:                        # optional, token -> emoji (case-insensitive match
 - `key` — matched case-insensitively against the person prefix in event titles.
 - `label` — optional display name (defaults to `key`).
 - `color` — `"r,g,b"` used as a translucent row background; `border`/`text` accent the row label.
+
+### Drag & drop options
+
+```yaml
+drag: true                    # optional, default true — long-press/drag events to move them
+drop_hours: [6, 22]           # optional, hour range shown in the drop-time panel
+```
+
+## Companion: `fwp-reload-card`
+
+The bundle also registers a tiny **kiosk reload button**. Home Assistant routes same-origin links
+internally (single-page app) and has no built-in "hard reload" action, so on a touch-only wall
+display there is otherwise no way to force a full page reload (e.g. after a card or HA update).
+
+```yaml
+type: custom:fwp-reload-card
+label: Dashboard neu laden    # optional
+icon: "🔄"                    # optional, "" to hide
+```
 
 ## Development
 
