@@ -19,7 +19,7 @@ import { LitElement, html, css } from "lit";
 import { styleMap } from "lit/directives/style-map.js";
 import { classMap } from "lit/directives/class-map.js";
 
-const CARD_VERSION = "0.2.0";
+const CARD_VERSION = "0.3.0";
 
 const WEEKDAYS = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"];
 
@@ -80,6 +80,8 @@ class FamilyWeekPlannerCard extends LitElement {
     _loading: { state: true },
     _dialog: { state: true },
     _kbShift: { state: true },
+    _drag: { state: true },
+    _toast: { state: true },
   };
 
   constructor() {
@@ -91,6 +93,23 @@ class FamilyWeekPlannerCard extends LitElement {
     this._hass = null;
     this._lastEntityUpdated = undefined;
     this._kbShift = false;
+    this._drag = null; // active drag: {item, el, x, y, grabDX, grabDY, w, target, hoverT, panelRect}
+    this._pending = null; // pointer down, not lifted yet
+    this._pressTimer = null;
+    this._suppressClickUntil = 0;
+    this._toast = null;
+  }
+
+  connectedCallback() {
+    super.connectedCallback();
+    this._onKey = (e) => {
+      if (e.key === "Escape" && this._drag) this._evPointerCancel();
+    };
+    window.addEventListener("keydown", this._onKey);
+  }
+  disconnectedCallback() {
+    window.removeEventListener("keydown", this._onKey);
+    super.disconnectedCallback();
   }
 
   setConfig(config) {
@@ -110,6 +129,10 @@ class FamilyWeekPlannerCard extends LitElement {
       default_end: config.default_end || "10:00",
       // On-screen keyboard for the title field: true / false / "auto" (show on touch devices).
       keyboard: config.keyboard ?? "auto",
+      // Drag & drop: long-press (touch) / drag (mouse) an event onto another cell to move it.
+      drag: config.drag !== false,
+      // Hour range offered in the drop-time panel [first, last].
+      drop_hours: Array.isArray(config.drop_hours) && config.drop_hours.length === 2 ? config.drop_hours : [6, 22],
     };
   }
 
@@ -399,6 +422,248 @@ class FamilyWeekPlannerCard extends LitElement {
     }
   }
 
+  /* ---------- drag & drop: move an event to another day / time / person ---------- */
+  _evPointerDown(e, it, el) {
+    if (!this.config.drag || this._dialog) return;
+    if (e.button !== undefined && e.button !== 0) return;
+    this._clearPress();
+    const r = el.getBoundingClientRect();
+    const p = {
+      item: it,
+      el,
+      pointerId: e.pointerId,
+      type: e.pointerType,
+      startX: e.clientX,
+      startY: e.clientY,
+      x: e.clientX,
+      y: e.clientY,
+      grabDX: e.clientX - r.left,
+      grabDY: e.clientY - r.top,
+      w: r.width,
+      target: null,
+      hoverT: null,
+      panelRect: null,
+    };
+    this._pending = p;
+    if (e.pointerType !== "mouse") {
+      // touch/pen: long-press lifts the card (a quick tap still opens the editor)
+      this._pressTimer = setTimeout(() => {
+        if (this._pending === p) this._lift();
+      }, 320);
+    }
+  }
+  _clearPress() {
+    if (this._pressTimer) {
+      clearTimeout(this._pressTimer);
+      this._pressTimer = null;
+    }
+  }
+  _lift() {
+    const p = this._pending;
+    if (!p) return;
+    this._clearPress();
+    try {
+      p.el.setPointerCapture(p.pointerId);
+    } catch (_) {
+      /* ignore */
+    }
+    this._pending = null;
+    this._drag = { ...p };
+    this._updateDragTarget(p.x, p.y);
+  }
+  _evPointerMove(e) {
+    const p = this._pending;
+    if (p && !this._drag) {
+      p.x = e.clientX;
+      p.y = e.clientY;
+      const moved = Math.hypot(e.clientX - p.startX, e.clientY - p.startY);
+      if (p.type === "mouse") {
+        if (moved > 8) this._lift();
+      } else if (moved > 12) {
+        this._clearPress(); // finger slipped before the long-press -> no drag
+        this._pending = null;
+      }
+      return;
+    }
+    if (!this._drag) return;
+    e.preventDefault();
+    this._drag = { ...this._drag, x: e.clientX, y: e.clientY };
+    this._updateDragTarget(e.clientX, e.clientY);
+  }
+  _evPointerUp(e) {
+    this._clearPress();
+    if (this._drag) {
+      e.preventDefault();
+      this._suppressClickUntil = Date.now() + 500;
+      const d = this._drag;
+      this._drag = null;
+      try {
+        d.el.releasePointerCapture(d.pointerId);
+      } catch (_) {
+        /* ignore */
+      }
+      if (d.target) this._performDrop(d);
+    }
+    this._pending = null;
+  }
+  _evPointerCancel() {
+    this._clearPress();
+    this._pending = null;
+    this._drag = null;
+  }
+
+  _updateDragTarget(x, y) {
+    const d = this._drag;
+    if (!d) return;
+    const el = this.shadowRoot.elementFromPoint(x, y);
+    const closest = (sel) => (el && el.closest ? el.closest(sel) : null);
+    let { target, hoverT, panelRect } = d;
+    const row = closest(".drow");
+    if (row) {
+      const t = row.dataset.t;
+      if (t === "keep" || t === "allday") hoverT = t;
+      else {
+        const rr = row.getBoundingClientRect();
+        hoverT = `${t}:${y > rr.top + rr.height / 2 ? "30" : "00"}`;
+      }
+    } else if (closest(".droppanel")) {
+      // over panel chrome (borders/gaps): keep the last choice
+    } else {
+      const td = closest("td.cell");
+      if (td) {
+        const person = td.dataset.person;
+        const day = Number(td.dataset.day);
+        if (!target || target.person !== person || target.day !== day) {
+          target = { person, day };
+          panelRect = td.getBoundingClientRect();
+        }
+        hoverT = "keep";
+      } else {
+        target = null;
+        panelRect = null;
+        hoverT = null;
+      }
+    }
+    this._drag = { ...d, target, hoverT, panelRect };
+  }
+
+  async _performDrop(d) {
+    const it = d.item;
+    const raw = it.raw;
+    const t = d.hoverT || "keep";
+    const samePlace = d.target.day === it.dayOffset && d.target.person === it.personKey && t === "keep";
+    if (samePlace) return;
+    const day = addDays(this._weekStart, d.target.day);
+    const s0 = parseDate(raw.start.dateTime || raw.start.date);
+    const e0raw = raw.end && (raw.end.dateTime || raw.end.date);
+    const e0 = e0raw ? parseDate(e0raw) : addDays(s0, it.allday ? 1 : 0);
+    let dtstart, dtend;
+    if (t === "allday" || (t === "keep" && it.allday)) {
+      const span = it.allday ? Math.max(1, Math.round((e0 - s0) / 86400000)) : 1;
+      dtstart = ymd(day);
+      dtend = ymd(addDays(day, span));
+    } else {
+      let H, M;
+      if (t === "keep") {
+        H = s0.getHours();
+        M = s0.getMinutes();
+      } else {
+        [H, M] = t.split(":").map(Number);
+      }
+      const dur = it.allday ? 60 * 60000 : Math.max(5 * 60000, e0 - s0);
+      const ns = new Date(day.getFullYear(), day.getMonth(), day.getDate(), H, M, 0);
+      const ne = new Date(ns.getTime() + dur);
+      dtstart = `${ymd(ns)} ${hm(ns)}:00`;
+      dtend = `${ymd(ne)} ${hm(ne)}:00`;
+    }
+    // Dropping onto another person's row re-assigns the event (title prefix changes).
+    let summary = raw.summary;
+    if (d.target.person !== it.personKey) {
+      const parsed = this._parseSummary(raw.summary);
+      summary = this._composeSummary(d.target.person, parsed.iconKey, parsed.title);
+    }
+    const msg = {
+      type: "calendar/event/update",
+      entity_id: this.config.entity,
+      uid: raw.uid,
+      event: { summary, dtstart, dtend },
+    };
+    if (raw.recurrence_id) {
+      msg.recurrence_id = raw.recurrence_id;
+      msg.recurrence_range = "";
+    }
+    this._toast = { text: "Verschiebe …" };
+    try {
+      await this._hass.callWS(msg);
+      await this._reload();
+      this._toast = null;
+    } catch (e) {
+      this._toast = { text: "Verschieben fehlgeschlagen: " + this._errText(e), error: true };
+      setTimeout(() => (this._toast = null), 4500);
+    }
+  }
+
+  _isLifted(it) {
+    const d = this._drag;
+    return !!d && d.item.raw.uid === it.raw.uid && (d.item.raw.recurrence_id || null) === (it.raw.recurrence_id || null);
+  }
+
+  _renderGhost() {
+    const d = this._drag;
+    if (!d) return "";
+    const it = d.item;
+    let tgt = "Loslassen bricht ab";
+    if (d.target) {
+      const day = addDays(this._weekStart, d.target.day);
+      const person = this._persons().find((p) => p.key === d.target.person);
+      const when =
+        d.hoverT === "allday"
+          ? "ganztags"
+          : !d.hoverT || d.hoverT === "keep"
+            ? it.allday
+              ? "ganztags"
+              : `${it.time} (Zeit behalten)`
+            : d.hoverT;
+      tgt = `→ ${WEEKDAYS[d.target.day].slice(0, 2)} ${fmtDM(day)} · ${person ? person.label || person.key : d.target.person} · ${when}`;
+    }
+    return html`<div
+      class="ghost"
+      style=${styleMap({ left: `${d.x - d.grabDX}px`, top: `${d.y - d.grabDY}px`, width: `${d.w}px` })}
+    >
+      <div>${it.emoji ? html`${it.emoji} ` : ""}${it.time ? html`<b>${it.time}</b> ` : ""}${it.title}</div>
+      <div class="gt">${tgt}</div>
+    </div>`;
+  }
+
+  _renderDropPanel() {
+    const d = this._drag;
+    if (!d || !d.target || !d.panelRect) return "";
+    const [h0, h1] = this.config.drop_hours;
+    const hours = [];
+    for (let h = h0; h <= h1; h++) hours.push(String(h).padStart(2, "0"));
+    const W = Math.max(d.panelRect.width, 190);
+    const H = 36 + 34 * (1 + hours.length);
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const left = Math.min(Math.max(8, d.panelRect.left), Math.max(8, vw - W - 8));
+    const top = Math.min(Math.max(8, d.panelRect.top), Math.max(8, vh - H - 8));
+    const day = addDays(this._weekStart, d.target.day);
+    const person = this._persons().find((p) => p.key === d.target.person);
+    const hot = (t) => d.hoverT === t || (!!d.hoverT && d.hoverT.startsWith(t + ":"));
+    return html`<div class="droppanel" style=${styleMap({ left: `${left}px`, top: `${top}px`, width: `${W}px` })}>
+      <div class="drow head ${d.hoverT === "keep" ? "hot" : ""}" data-t="keep">
+        <span>${WEEKDAYS[d.target.day]} ${fmtDM(day)} · ${person ? person.label || person.key : ""}</span>
+        <span class="hint">Zeit behalten</span>
+      </div>
+      <div class="drow allday ${hot("allday") ? "hot" : ""}" data-t="allday">Ganztags</div>
+      ${hours.map(
+        (hh) => html`<div class="drow ${hot(hh) ? "hot" : ""}" data-t=${hh}>
+          <span>${hh}:00</span>${hot(hh) ? html`<span class="sel">${d.hoverT}</span>` : ""}
+        </div>`
+      )}
+    </div>`;
+  }
+
   getCardSize() {
     return this._persons().length * 3 + 2;
   }
@@ -447,17 +712,30 @@ class FamilyWeekPlannerCard extends LitElement {
                   </td>
                   ${days.map((d, i) => {
                     const cellItems = items.filter((it) => it.dayOffset === i && it.personKey === p.key);
+                    const over = !!this._drag && !!this._drag.target && this._drag.target.person === p.key && this._drag.target.day === i;
                     return html`<td
-                      class=${classMap({ today: i === todayCol, cell: true })}
+                      class=${classMap({ today: i === todayCol, cell: true, dropover: over })}
                       style=${styleMap({ height: rowH, background: `rgba(${p.color},${p.alpha ?? 0.13})` })}
-                      @click=${() => this._openCreate(p, d)}
+                      data-person=${p.key}
+                      data-day=${i}
+                      @click=${() => {
+                        if (Date.now() < this._suppressClickUntil) return;
+                        this._openCreate(p, d);
+                      }}
                       title="Neuen Termin für ${p.label || p.key} am ${fmtDM(d)} anlegen"
                     >
                       ${cellItems.map(
                         (it) => html`<div
-                          class="ev"
+                          class=${classMap({ ev: true, lifted: this._isLifted(it) })}
+                          @pointerdown=${(e) => this._evPointerDown(e, it, e.currentTarget)}
+                          @pointermove=${(e) => this._evPointerMove(e)}
+                          @pointerup=${(e) => this._evPointerUp(e)}
+                          @pointercancel=${() => this._evPointerCancel()}
+                          @dragstart=${(e) => e.preventDefault()}
+                          @contextmenu=${(e) => e.preventDefault()}
                           @click=${(e) => {
                             e.stopPropagation();
+                            if (Date.now() < this._suppressClickUntil) return;
                             this._openEdit(it);
                           }}
                         >
@@ -472,6 +750,9 @@ class FamilyWeekPlannerCard extends LitElement {
           </table>
         </div>
         ${this._dialog ? this._renderDialog() : ""}
+        ${this._renderDropPanel()}
+        ${this._renderGhost()}
+        ${this._toast ? html`<div class="toast ${this._toast.error ? "err" : ""}">${this._toast.text}</div>` : ""}
       </ha-card>
     `;
   }
@@ -902,6 +1183,101 @@ class FamilyWeekPlannerCard extends LitElement {
       font-size: 15px;
       letter-spacing: 0.5px;
     }
+
+    /* ---- drag & drop ---- */
+    .ev {
+      touch-action: none;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    .ev.lifted {
+      opacity: 0.35;
+    }
+    td.cell.dropover {
+      outline: 2px solid #ffd54f;
+      outline-offset: -2px;
+    }
+    .ghost {
+      position: fixed;
+      z-index: 31;
+      pointer-events: none;
+      background: rgba(28, 31, 36, 0.96);
+      border: 1px solid rgba(255, 255, 255, 0.35);
+      border-radius: 8px;
+      padding: 6px 10px;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.6);
+      transform: scale(1.05);
+      font-size: 14px;
+      line-height: 1.3;
+      word-break: break-word;
+    }
+    .ghost .gt {
+      font-size: 12px;
+      margin-top: 5px;
+      color: #ffd54f;
+    }
+    .droppanel {
+      position: fixed;
+      z-index: 30;
+      background: #1d2026;
+      border: 1px solid rgba(255, 255, 255, 0.28);
+      border-radius: 12px;
+      box-shadow: 0 14px 40px rgba(0, 0, 0, 0.6);
+      overflow: hidden;
+      font-size: 14px;
+      user-select: none;
+    }
+    .drow {
+      height: 34px;
+      line-height: 34px;
+      padding: 0 12px;
+      border-top: 1px solid rgba(255, 255, 255, 0.06);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      white-space: nowrap;
+    }
+    .drow.head {
+      height: 36px;
+      background: rgba(255, 255, 255, 0.12);
+      font-weight: 600;
+      font-size: 13px;
+      border-top: none;
+    }
+    .drow.head .hint {
+      font-weight: normal;
+      opacity: 0.7;
+      font-size: 12px;
+      margin-left: 8px;
+    }
+    .drow.allday {
+      font-style: italic;
+      opacity: 0.9;
+    }
+    .drow.hot {
+      background: var(--primary-color, #03a9f4);
+      color: #fff;
+      opacity: 1;
+    }
+    .drow .sel {
+      font-weight: 700;
+    }
+    .toast {
+      position: fixed;
+      left: 50%;
+      bottom: 24px;
+      transform: translateX(-50%);
+      background: rgba(20, 22, 26, 0.95);
+      border: 1px solid rgba(255, 255, 255, 0.25);
+      border-radius: 10px;
+      padding: 10px 16px;
+      z-index: 32;
+      font-size: 14px;
+    }
+    .toast.err {
+      border-color: rgba(211, 47, 47, 0.6);
+      color: #ff9a9a;
+    }
   `;
 }
 
@@ -912,6 +1288,72 @@ window.customCards.push({
   type: "family-week-planner-card",
   name: "Family Week Planner",
   description: "Editable person-by-day family week planner over one calendar entity (Person|Icon: Title events).",
+  preview: false,
+  documentationURL: "https://github.com/psewar/family-week-planner-card",
+});
+
+/**
+ * fwp-reload-card — tiny companion card for kiosk dashboards: one tap performs a
+ * real full-page reload (location.reload()). Needed because Home Assistant routes
+ * same-origin links internally (SPA) and offers no built-in "hard reload" action.
+ */
+class FwpReloadCard extends LitElement {
+  setConfig(config) {
+    this._cfg = {
+      label: (config && config.label) || "Dashboard neu laden",
+      icon: config && config.icon !== undefined ? config.icon : "🔄",
+    };
+  }
+  set hass(h) {
+    this._hass = h;
+  }
+  getCardSize() {
+    return 1;
+  }
+  render() {
+    const c = this._cfg || {};
+    return html`<ha-card>
+      <button class="reload" @click=${() => window.location.reload()}>
+        ${c.icon ? html`<span class="ic">${c.icon}</span>` : ""}<span>${c.label}</span>
+      </button>
+    </ha-card>`;
+  }
+  static styles = css`
+    ha-card {
+      background: transparent;
+      border: none;
+      box-shadow: none;
+      padding: 0;
+    }
+    .reload {
+      width: 100%;
+      min-height: 64px;
+      font-size: 18px;
+      font-weight: 600;
+      border-radius: 14px;
+      border: 1px solid rgba(255, 255, 255, 0.18);
+      background: rgba(255, 255, 255, 0.1);
+      color: var(--primary-text-color, #e6e6e6);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      -webkit-tap-highlight-color: rgba(255, 255, 255, 0.2);
+    }
+    .reload:active {
+      background: rgba(255, 255, 255, 0.22);
+    }
+    .ic {
+      font-size: 22px;
+    }
+  `;
+}
+customElements.define("fwp-reload-card", FwpReloadCard);
+window.customCards.push({
+  type: "fwp-reload-card",
+  name: "FWP Kiosk Reload",
+  description: "One-tap full page reload for kiosk dashboards (companion to Family Week Planner).",
   preview: false,
   documentationURL: "https://github.com/psewar/family-week-planner-card",
 });
