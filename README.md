@@ -41,6 +41,9 @@ entity: calendar.your_family_calendar
 title: Familienwoche          # optional
 row_height: 210               # optional, px per person row (portrait screens)
 show_toolbar: true            # optional, week navigation + "Heute"
+keyboard: auto                # optional: true | false | auto — built-in on-screen keyboard for the
+                              #   title field (auto = show on touch devices). Set false if the OS
+                              #   already provides a system on-screen keyboard (e.g. squeekboard).
 fallback_person: Rest         # optional, row for titles without a known person
 persons:                      # optional, defaults are neutral placeholders
   - { key: Familie,  color: "126,87,194", border: "#7e57c2", text: "#c9b3f0" }
