@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>family-week-planner-card · Dev</title>
+    <style>
+      :root {
+        --primary-color: #03a9f4;
+        --primary-text-color: #e6e6e6;
+        --card-background-color: #1c1f24;
+        --ha-card-background: #1c1f24;
+      }
+      html,
+      body {
+        margin: 0;
+        background: #0e1013;
+        color: #e6e6e6;
+        font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      }
+      .bar {
+        display: flex;
+        gap: 12px;
+        align-items: center;
+        padding: 10px 16px;
+        border-bottom: 1px solid #262a30;
+        font-size: 13px;
+      }
+      .bar button {
+        background: #23272e;
+        color: #e6e6e6;
+        border: 1px solid #333;
+        border-radius: 8px;
+        padding: 6px 12px;
+        cursor: pointer;
+      }
+      .bar .log {
+        opacity: 0.7;
+      }
+      /* Simulate the portrait mirror column */
+      .stage {
+        max-width: 1040px;
+        margin: 18px auto;
+        padding: 0 12px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="bar">
+      <strong>family-week-planner-card</strong>
+      <button id="dump">Store in Konsole</button>
+      <span class="log" id="log">bereit</span>
+    </div>
+    <div class="stage" id="stage"></div>
+
+    <script type="module">
+      await import("/dist/family-week-planner-card.js");
+
+      /* ---------- date helpers (mirror the card's local logic) ---------- */
+      const pad = (n) => String(n).padStart(2, "0");
+      const mondayOf = (date) => {
+        const x = new Date(date);
+        const day = (x.getDay() + 6) % 7;
+        x.setDate(x.getDate() - day);
+        x.setHours(0, 0, 0, 0);
+        return x;
+      };
+      const addDays = (d, n) => {
+        const x = new Date(d);
+        x.setDate(x.getDate() + n);
+        return x;
+      };
+      const ymd = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+      const MON = mondayOf(new Date());
+      const at = (off, h, m) => {
+        const d = addDays(MON, off);
+        d.setHours(h, m, 0, 0);
+        return d;
+      };
+
+      const log = (m) => (document.getElementById("log").textContent = m);
+      let idc = 100;
+      const nextUid = () => `mock-${idc++}`;
+
+      const timed = (off, h1, m1, h2, m2, summary) => ({
+        uid: nextUid(),
+        summary,
+        start: { dateTime: at(off, h1, m1).toISOString() },
+        end: { dateTime: at(off, h2, m2).toISOString() },
+      });
+      const allday = (off, summary, span = 1) => ({
+        uid: nextUid(),
+        summary,
+        start: { date: ymd(addDays(MON, off)) },
+        end: { date: ymd(addDays(MON, off + span)) },
+      });
+
+      // In-memory calendar the mock reads/writes so CRUD is visible on reload.
+      // Fictional demo names — real household names live only in the dashboard config.
+      let STORE = [
+        timed(0, 7, 0, 8, 0, "Anna|Sport: Joggen"),
+        timed(0, 20, 0, 22, 0, "Anna|Tanzen: Tanzkurs"),
+        timed(0, 8, 0, 12, 0, "Ben|Schule: Lernen"),
+        allday(1, "Familie|Ausflug: Zoo"),
+        timed(2, 15, 30, 16, 30, "Carla|Schule: Ballett"),
+        timed(2, 18, 15, 19, 30, "Ben|Sport: Fussball"),
+        timed(3, 20, 0, 22, 0, "Anna|Chor: Chorprobe"),
+        timed(4, 12, 0, 13, 0, "Essen|Mittag: Mittagessen"),
+        allday(5, "Ausflug See"),
+        timed(6, 10, 0, 10, 30, "David|Arzt: Zahnarzt"),
+      ];
+
+      const toDate = (o) => (o.dateTime ? new Date(o.dateTime) : new Date(o.date + "T00:00:00"));
+
+      const mockHass = {
+        language: "de",
+        states: {
+          "calendar.familie": { state: "on", last_updated: new Date().toISOString(), attributes: {} },
+        },
+        localize: (k) => k,
+        async callApi(method, path) {
+          const q = new URLSearchParams(path.split("?")[1] || "");
+          const start = new Date(q.get("start"));
+          const end = new Date(q.get("end"));
+          const out = STORE.filter((e) => {
+            const s = toDate(e.start);
+            const en = e.end ? toDate(e.end) : addDays(s, 1);
+            return s < end && en > start;
+          }).map((e) => JSON.parse(JSON.stringify(e)));
+          log(`GET ${method} → ${out.length} Termine`);
+          return out;
+        },
+        async callWS(msg) {
+          if (msg.type === "calendar/event/create") {
+            const ev = fromWs(msg.event);
+            ev.uid = nextUid();
+            STORE.push(ev);
+            log(`create: "${msg.event.summary}"`);
+            return {};
+          }
+          if (msg.type === "calendar/event/update") {
+            const i = STORE.findIndex((e) => e.uid === msg.uid);
+            if (i >= 0) STORE[i] = { ...fromWs(msg.event), uid: msg.uid };
+            log(`update ${msg.uid}: "${msg.event.summary}"`);
+            return {};
+          }
+          if (msg.type === "calendar/event/delete") {
+            STORE = STORE.filter((e) => e.uid !== msg.uid);
+            log(`delete ${msg.uid}`);
+            return {};
+          }
+          log(`callWS ${msg.type}`);
+          return {};
+        },
+      };
+
+      // Convert a WS event ({summary,dtstart,dtend}) back into REST start/end objects.
+      function fromWs(ev) {
+        const isDate = (s) => /^\d{4}-\d{2}-\d{2}$/.test(s);
+        const mk = (s) => {
+          if (isDate(s)) return { date: s };
+          const [datePart, timePart] = s.split(" ");
+          const [y, m, d] = datePart.split("-").map(Number);
+          const [H, Mi, S] = (timePart || "00:00:00").split(":").map(Number);
+          return { dateTime: new Date(y, m - 1, d, H, Mi, S || 0).toISOString() };
+        };
+        return { summary: ev.summary, start: mk(ev.dtstart), end: mk(ev.dtend), description: ev.description };
+      }
+
+      const card = document.createElement("family-week-planner-card");
+      card.setConfig({
+        title: "Familienwoche",
+        entity: "calendar.familie",
+        persons: [
+          { key: "Familie", color: "126,87,194", border: "#7e57c2", text: "#c9b3f0" },
+          { key: "Anna", color: "30,136,229", border: "#1e88e5", text: "#8ecbff" },
+          { key: "Ben", color: "236,64,122", border: "#ec407a", text: "#ff9ec4" },
+          { key: "Carla", color: "0,137,123", border: "#00897b", text: "#5fd4c6", alpha: 0.15 },
+          { key: "David", color: "251,140,0", border: "#fb8c00", text: "#ffca7a" },
+          { key: "Essen", color: "109,76,65", border: "#6d4c41", text: "#c8b0a4", alpha: 0.16 },
+          { key: "Rest", color: "84,110,122", border: "#546e7a", text: "#b0bec5", alpha: 0.14 },
+        ],
+      });
+      card.hass = mockHass;
+      document.getElementById("stage").appendChild(card);
+
+      // Re-push hass periodically so external-like changes would refresh (also proves no fetch storm).
+      document.getElementById("dump").onclick = () => {
+        console.log("STORE", STORE);
+        log(`${STORE.length} Termine im Store (siehe Konsole)`);
+      };
+    </script>
+  </body>
+</html>
