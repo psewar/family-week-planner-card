@@ -19,7 +19,7 @@ import { LitElement, html, css } from "lit";
 import { styleMap } from "lit/directives/style-map.js";
 import { classMap } from "lit/directives/class-map.js";
 
-const CARD_VERSION = "0.1.1";
+const CARD_VERSION = "0.2.0";
 
 const WEEKDAYS = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"];
 
@@ -79,6 +79,7 @@ class FamilyWeekPlannerCard extends LitElement {
     _events: { state: true },
     _loading: { state: true },
     _dialog: { state: true },
+    _kbShift: { state: true },
   };
 
   constructor() {
@@ -89,6 +90,7 @@ class FamilyWeekPlannerCard extends LitElement {
     this._weekStart = mondayOf(new Date());
     this._hass = null;
     this._lastEntityUpdated = undefined;
+    this._kbShift = false;
   }
 
   setConfig(config) {
@@ -106,6 +108,8 @@ class FamilyWeekPlannerCard extends LitElement {
       default_icon: config.default_icon || "",
       default_start: config.default_start || "09:00",
       default_end: config.default_end || "10:00",
+      // On-screen keyboard for the title field: true / false / "auto" (show on touch devices).
+      keyboard: config.keyboard ?? "auto",
     };
   }
 
@@ -483,13 +487,66 @@ class FamilyWeekPlannerCard extends LitElement {
     </div>`;
   }
 
+  _kbEnabled() {
+    const k = this.config.keyboard;
+    if (k === true) return true;
+    if (k === false) return false;
+    return (navigator.maxTouchPoints || 0) > 0; // "auto"
+  }
+
+  _kbType(key) {
+    const d = this._dialog;
+    if (!d) return;
+    let title = d.title || "";
+    if (key === "back") {
+      title = title.slice(0, -1);
+    } else if (key === "space") {
+      title += " ";
+    } else if (key === "shift") {
+      this._kbShift = !this._kbShift;
+      return;
+    } else {
+      const isLetter = /^[a-zäöü]$/.test(key);
+      title += this._kbShift && isLetter ? key.toUpperCase() : key;
+      if (this._kbShift && isLetter) this._kbShift = false;
+    }
+    this._dialog = { ...d, title, error: "" };
+  }
+
+  _renderKeyboard() {
+    const rows = [
+      ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"],
+      ["q", "w", "e", "r", "t", "z", "u", "i", "o", "p", "ü"],
+      ["a", "s", "d", "f", "g", "h", "j", "k", "l", "ö", "ä"],
+      ["shift", "y", "x", "c", "v", "b", "n", "m", "ß", "back"],
+    ];
+    const key = (k) => {
+      if (k === "shift")
+        return html`<button
+          class="key wide ${this._kbShift ? "active" : ""}"
+          @click=${() => this._kbType("shift")}
+        >⇧</button>`;
+      if (k === "back")
+        return html`<button class="key wide" @click=${() => this._kbType("back")}>⌫</button>`;
+      const isLetter = /^[a-zäöü]$/.test(k);
+      const label = this._kbShift && isLetter ? k.toUpperCase() : k;
+      return html`<button class="key" @click=${() => this._kbType(k)}>${label}</button>`;
+    };
+    return html`<div class="kb" @mousedown=${(e) => e.preventDefault()}>
+      ${rows.map((row) => html`<div class="kbrow">${row.map(key)}</div>`)}
+      <div class="kbrow">
+        <button class="key space" @click=${() => this._kbType("space")}>Leerzeichen</button>
+      </div>
+    </div>`;
+  }
+
   _renderDialog() {
     const d = this._dialog;
     const persons = this._persons();
     const iconKeys = Object.keys(this._icons());
     return html`
       <div class="overlay" @click=${this._onOverlayClick}>
-        <div class="modal" @click=${(e) => e.stopPropagation()}>
+        <div class="modal ${this._kbEnabled() ? "wide" : ""}" @click=${(e) => e.stopPropagation()}>
           <div class="mhead">${d.mode === "create" ? "Neuer Termin" : "Termin bearbeiten"}</div>
           ${d.recurring ? html`<div class="note">Serientermin – Änderungen betreffen diesen Termin.</div>` : ""}
           ${d.error ? html`<div class="err">${d.error}</div>` : ""}
@@ -545,6 +602,8 @@ class FamilyWeekPlannerCard extends LitElement {
                   <input type="time" .value=${d.end} @input=${(e) => this._set("end", e.target.value)} />
                 </label>
               </div>`}
+
+          ${this._kbEnabled() ? this._renderKeyboard() : ""}
 
           <div class="actions">
             ${d.mode === "edit"
@@ -797,6 +856,51 @@ class FamilyWeekPlannerCard extends LitElement {
     .actions button[disabled] {
       opacity: 0.5;
       cursor: default;
+    }
+
+    /* ---- on-screen keyboard ---- */
+    .modal.wide {
+      width: min(96vw, 640px);
+    }
+    .kb {
+      margin: 4px 0 12px;
+      user-select: none;
+      touch-action: manipulation;
+    }
+    .kbrow {
+      display: flex;
+      gap: 6px;
+      margin-bottom: 6px;
+    }
+    .kb .key {
+      flex: 1 1 0;
+      min-width: 0;
+      min-height: 46px;
+      font-size: 17px;
+      border-radius: 8px;
+      border: 1px solid rgba(255, 255, 255, 0.18);
+      background: rgba(255, 255, 255, 0.09);
+      color: inherit;
+      cursor: pointer;
+      padding: 0;
+    }
+    .kb .key:active {
+      background: rgba(255, 255, 255, 0.28);
+    }
+    .kb .key.wide {
+      flex: 1.6 1 0;
+      font-size: 18px;
+    }
+    .kb .key.active {
+      background: var(--primary-color, #03a9f4);
+      border-color: var(--primary-color, #03a9f4);
+      color: #fff;
+    }
+    .kb .key.space {
+      flex: 1 1 100%;
+      min-height: 44px;
+      font-size: 15px;
+      letter-spacing: 0.5px;
     }
   `;
 }
