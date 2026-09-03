@@ -19,7 +19,7 @@ import { LitElement, html, css } from "lit";
 import { styleMap } from "lit/directives/style-map.js";
 import { classMap } from "lit/directives/class-map.js";
 
-const CARD_VERSION = "0.8.0";
+const CARD_VERSION = "0.9.0";
 
 const WEEKDAYS = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"];
 
@@ -132,6 +132,53 @@ function recurLabel(key, rrule) {
   if (key === "custom") return `eigene Regel (${rrule})`;
   const hit = RECUR_PRESETS.find((r) => r.key === key);
   return hit ? hit.label : key;
+}
+
+/* ---------- rows (persons): colors and the optional HA helper ---------- */
+const ROW_PALETTE = ["#7e57c2", "#1e88e5", "#ec407a", "#00897b", "#fb8c00", "#6d4c41", "#546e7a", "#8e24aa", "#43a047", "#d81b60", "#00acc1", "#f4511e"];
+function hexToRgb(v) {
+  if (!v) return null;
+  const s = String(v).trim();
+  let m = s.match(/^#?([0-9a-f]{6})$/i);
+  if (m) return [parseInt(m[1].slice(0, 2), 16), parseInt(m[1].slice(2, 4), 16), parseInt(m[1].slice(4, 6), 16)];
+  m = s.match(/^#?([0-9a-f]{3})$/i);
+  if (m) return [...m[1]].map((c) => parseInt(c + c, 16));
+  m = s.match(/^(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})$/);
+  if (m) return [Number(m[1]), Number(m[2]), Number(m[3])];
+  return null;
+}
+const rgbToHex = (rgb) => "#" + rgb.map((x) => Math.max(0, Math.min(255, Math.round(x))).toString(16).padStart(2, "0")).join("");
+const mixWhite = (rgb, t) => rgbToHex(rgb.map((x) => x + (255 - x) * t));
+// Build a complete row from a name and ONE color (hex "#rrggbb" or "r,g,b"); the translucent
+// background, the border and the lighter label color are derived from it.
+function personFromColor(key, colorRaw, index, extra = {}) {
+  const rgb = hexToRgb(colorRaw) || hexToRgb(ROW_PALETTE[index % ROW_PALETTE.length]);
+  return { key, color: rgb.join(","), border: rgbToHex(rgb), text: mixWhite(rgb, 0.55), ...extra };
+}
+// Rows maintained in Home Assistant: input_select options (or input_text lines / ";"-separated)
+// "Name", "Name:#rrggbb", "Name:r,g,b" or "Name:#rrggbb:Label". The fallback row is appended
+// when missing so nothing can fall through.
+function personsFromEntity(st, fallbackKey) {
+  if (!st) return null;
+  let specs = [];
+  if (st.attributes && Array.isArray(st.attributes.options)) specs = st.attributes.options;
+  else if (typeof st.state === "string") specs = st.state.split(/[\n;]+/);
+  const out = [];
+  for (const raw of specs) {
+    const parts = String(raw)
+      .split(":")
+      .map((x) => x.trim());
+    const key = parts[0];
+    if (!key || out.some((p) => p.key.toLowerCase() === key.toLowerCase())) continue;
+    const p = personFromColor(key, parts[1] || "", out.length);
+    if (parts[2]) p.label = parts[2];
+    out.push(p);
+  }
+  if (!out.length) return null;
+  if (fallbackKey && !out.some((p) => p.key.toLowerCase() === fallbackKey.toLowerCase())) {
+    out.push(personFromColor(fallbackKey, "#546e7a", out.length, { alpha: 0.14 }));
+  }
+  return out;
 }
 
 /* ---------- to-do lists: tasks shown in the grid ---------- */
@@ -413,7 +460,28 @@ class FamilyWeekPlannerCard extends LitElement {
       todo_cleanup_days: config.todo_cleanup_days ?? 7,
       // What a tap on an empty cell creates first: "event" or "task".
       default_kind: config.default_kind === "task" ? "task" : "event",
+      // Optional HA entity (input_select / input_text) whose entries define the rows.
+      persons_entity: config.persons_entity || null,
     };
+    // Rows may be given with just a name and one color; derive the rest. The fallback row is
+    // always present so events/tasks without a matching person have a place to land.
+    this.config.persons = this.config.persons.map((p, i) => ({ ...personFromColor(p.key, p.border || p.color, i), ...p }));
+    const fb = this.config.fallback_person;
+    if (!this.config.persons.some((p) => p.key.toLowerCase() === fb.toLowerCase())) {
+      this.config.persons = [...this.config.persons, personFromColor(fb, "#546e7a", this.config.persons.length, { alpha: 0.14 })];
+    }
+    this._personsStamp = undefined;
+  }
+
+  static getConfigElement() {
+    return document.createElement("family-week-planner-card-editor");
+  }
+  static getStubConfig(hass) {
+    const states = (hass && hass.states) || {};
+    const cals = Object.keys(states).filter((id) => id.startsWith("calendar."));
+    // prefer a calendar that can be edited (UPDATE_EVENT feature bit)
+    const rw = cals.find((id) => (((states[id] || {}).attributes || {}).supported_features || 0) & 4) || cals[0];
+    return { entity: rw || "calendar.example", title: "Familienwoche" };
   }
 
   set hass(hass) {
@@ -439,6 +507,15 @@ class FamilyWeekPlannerCard extends LitElement {
         if (!first) this._loadTodos();
       }
     }
+    // Rows maintained in HA: re-render (and re-measure) when the helper changes.
+    if (this.config.persons_entity) {
+      const pe = hass.states[this.config.persons_entity];
+      const pu = pe ? pe.last_updated : "missing";
+      if (pu !== this._personsUpdated) {
+        this._personsUpdated = pu;
+        this.requestUpdate();
+      }
+    }
     // Icon map maintained in HA (input_select / input_text): re-render when it changes.
     if (this.config.icons_entity) {
       const ie = hass.states[this.config.icons_entity];
@@ -454,6 +531,17 @@ class FamilyWeekPlannerCard extends LitElement {
   }
 
   _persons() {
+    // Rows from a helper in Home Assistant take precedence when configured and non-empty.
+    const ent = this.config.persons_entity;
+    const st = ent && this._hass && this._hass.states[ent];
+    if (st) {
+      const stamp = `${st.last_updated}|${st.state}`;
+      if (this._personsStamp !== stamp) {
+        this._personsStamp = stamp;
+        this._personsFromHelper = personsFromEntity(st, this.config.fallback_person);
+      }
+      if (this._personsFromHelper) return this._personsFromHelper;
+    }
     return this.config.persons;
   }
   _icons() {
@@ -2640,6 +2728,393 @@ class FamilyWeekPlannerCard extends LitElement {
 }
 
 customElements.define("family-week-planner-card", FamilyWeekPlannerCard);
+
+/* ---------- visual config editor (Dashboard → Bearbeiten → Karte) ---------- */
+class FamilyWeekPlannerCardEditor extends LitElement {
+  static properties = { hass: { attribute: false }, _config: { state: true } };
+
+  setConfig(config) {
+    this._config = { ...(config || {}) };
+  }
+  _emit(patch) {
+    const cfg = { ...this._config, ...patch };
+    for (const k of Object.keys(patch)) if (patch[k] === undefined) delete cfg[k];
+    this._config = cfg;
+    this.dispatchEvent(new CustomEvent("config-changed", { detail: { config: cfg }, bubbles: true, composed: true }));
+  }
+  _ents(...domains) {
+    const st = (this.hass && this.hass.states) || {};
+    return Object.keys(st)
+      .filter((id) => domains.includes(id.split(".")[0]))
+      .sort();
+  }
+  _name(id) {
+    const s = this.hass && this.hass.states && this.hass.states[id];
+    return (s && s.attributes && s.attributes.friendly_name) || id;
+  }
+
+  /* rows */
+  get _persons() {
+    const p = this._config.persons;
+    return Array.isArray(p) && p.length ? p : DEFAULT_PERSONS;
+  }
+  _setPersons(list) {
+    this._emit({ persons: list.map((p) => ({ ...p })) });
+  }
+  _personChange(i, field, value) {
+    const list = this._persons.map((p) => ({ ...p }));
+    if (field === "key") list[i].key = value.trim() || list[i].key;
+    else Object.assign(list[i], personFromColor(list[i].key, value, i, list[i].alpha !== undefined ? { alpha: list[i].alpha } : {}));
+    this._setPersons(list);
+  }
+  _personMove(i, dir) {
+    const list = [...this._persons];
+    const j = i + dir;
+    if (j < 0 || j >= list.length) return;
+    [list[i], list[j]] = [list[j], list[i]];
+    this._setPersons(list);
+  }
+  _personRemove(i) {
+    const list = [...this._persons];
+    list.splice(i, 1);
+    this._setPersons(list);
+  }
+  _personAdd() {
+    const list = [...this._persons];
+    list.push(personFromColor("Neu", "", list.length));
+    this._setPersons(list);
+  }
+
+  /* icons */
+  get _icons() {
+    const ic = this._config.icons;
+    return ic && Object.keys(ic).length ? ic : DEFAULT_ICONS;
+  }
+  _iconsEntries() {
+    return Object.entries(this._icons).map(([k, v]) => [k, v]);
+  }
+  _setIcons(entries) {
+    const map = {};
+    for (const [k, v] of entries) if (String(k).trim()) map[String(k).trim()] = String(v).trim();
+    this._emit({ icons: map });
+  }
+  _iconChange(i, idx, value) {
+    const e = this._iconsEntries();
+    e[i][idx] = value;
+    this._setIcons(e);
+  }
+  _iconRemove(i) {
+    const e = this._iconsEntries();
+    e.splice(i, 1);
+    this._setIcons(e);
+  }
+  _iconAdd() {
+    const e = this._iconsEntries();
+    e.push(["Neu", "⭐"]);
+    this._setIcons(e);
+  }
+
+  /* to-do lists */
+  get _todos() {
+    return normalizeTodoConfig(this._config);
+  }
+  _setTodos(list) {
+    const out = list.map((t) => {
+      const o = { entity: t.entity };
+      if (t.label && t.label !== t.entity.split(".").pop()) o.label = t.label;
+      if (t.person) o.person = t.person;
+      if (t.icon) o.icon = t.icon;
+      if (!t.prefix) o.prefix = false;
+      if (t.readonly) o.readonly = true;
+      return o;
+    });
+    this._emit({ todo_entities: out.length ? out : undefined, todo_entity: undefined });
+  }
+  _todoChange(i, field, value) {
+    const list = this._todos.map((t) => ({ ...t }));
+    list[i][field] = value;
+    this._setTodos(list);
+  }
+  _todoRow(i, person) {
+    const list = this._todos.map((t) => ({ ...t }));
+    list[i].person = person || null;
+    list[i].prefix = !person;
+    this._setTodos(list);
+  }
+  _todoRemove(i) {
+    const list = this._todos;
+    list.splice(i, 1);
+    this._setTodos(list);
+  }
+  _todoAdd() {
+    const list = this._todos;
+    list.push({ entity: this._ents("todo")[0] || "todo.", label: "", person: null, icon: "", prefix: true, readonly: false });
+    this._setTodos(list);
+  }
+
+  render() {
+    if (!this._config) return html``;
+    const c = this._config;
+    const rowH = c.row_height ?? "auto";
+    const sel = (value, options, onChange, empty) => html`<select @change=${(e) => onChange(e.target.value)}>
+      ${empty ? html`<option value="" ?selected=${!value}>${empty}</option>` : ""}
+      ${options.map((o) => html`<option value=${o.value} ?selected=${o.value === String(value ?? "")}>${o.label}</option>`)}
+    </select>`;
+    const entOpts = (domains) => this._ents(...domains).map((id) => ({ value: id, label: `${this._name(id)} (${id})` }));
+    const helperOpts = entOpts(["input_select", "input_text"]);
+    return html`
+      <div class="sec">
+        <h3>Kalender</h3>
+        <label>Kalender-Entität ${sel(c.entity, entOpts(["calendar"]), (v) => this._emit({ entity: v }), "– wählen –")}</label>
+        <label>Titel <input type="text" .value=${c.title || ""} @change=${(e) => this._emit({ title: e.target.value || undefined })} /></label>
+        <div class="grid">
+          <label
+            >Zeilenhöhe
+            ${sel(
+              rowH === "auto" ? "auto" : "fixed",
+              [
+                { value: "auto", label: "automatisch (Bildschirm füllen)" },
+                { value: "fixed", label: "fest (px)" },
+              ],
+              (v) => this._emit({ row_height: v === "auto" ? undefined : Number(c.row_height) || 210 })
+            )}</label
+          >
+          ${rowH !== "auto"
+            ? html`<label>Höhe (px) <input type="number" min="40" .value=${String(rowH)} @change=${(e) => this._emit({ row_height: Number(e.target.value) || 210 })} /></label>`
+            : html`<span></span>`}
+          <label>Von (Standard) <input type="time" .value=${c.default_start || "09:00"} @change=${(e) => this._emit({ default_start: e.target.value || undefined })} /></label>
+          <label>Bis (Standard) <input type="time" .value=${c.default_end || "10:00"} @change=${(e) => this._emit({ default_end: e.target.value || undefined })} /></label>
+          <label
+            >Bildschirmtastatur
+            ${sel(
+              String(c.keyboard ?? "auto"),
+              [
+                { value: "auto", label: "automatisch (bei Touch)" },
+                { value: "true", label: "immer" },
+                { value: "false", label: "nie (System-Tastatur)" },
+              ],
+              (v) => this._emit({ keyboard: v === "auto" ? undefined : v === "true" })
+            )}</label
+          >
+          <label
+            >Antippen einer leeren Zelle legt an
+            ${sel(
+              c.default_kind || "event",
+              [
+                { value: "event", label: "Termin" },
+                { value: "task", label: "Aufgabe" },
+              ],
+              (v) => this._emit({ default_kind: v === "event" ? undefined : v })
+            )}</label
+          >
+        </div>
+        <label class="chk"><input type="checkbox" .checked=${c.show_toolbar !== false} @change=${(e) => this._emit({ show_toolbar: e.target.checked ? undefined : false })} /> Wochen-Navigation anzeigen</label>
+        <label class="chk"><input type="checkbox" .checked=${c.drag !== false} @change=${(e) => this._emit({ drag: e.target.checked ? undefined : false })} /> Termine und Aufgaben per Ziehen verschieben</label>
+      </div>
+
+      <div class="sec">
+        <h3>Zeilen</h3>
+        <label>Zeilen aus Helfer (optional) ${sel(c.persons_entity || "", helperOpts, (v) => this._emit({ persons_entity: v || undefined }), "– hier in der Karte pflegen –")}</label>
+        ${c.persons_entity
+          ? html`<p class="hint">
+              Die Zeilen kommen aus <code>${c.persons_entity}</code> – Einträge „Name" oder „Name:#Farbe" in gewünschter Reihenfolge. Fehlt die
+              Rest-Zeile, wird sie automatisch angehängt.
+            </p>`
+          : html`<div class="rows">
+                ${this._persons.map(
+                  (p, i) => html`<div class="row">
+                    <input type="text" class="grow" .value=${p.key} @change=${(e) => this._personChange(i, "key", e.target.value)} />
+                    <input
+                      type="color"
+                      title="Farbe"
+                      .value=${p.border || rgbToHex(hexToRgb(p.color) || [84, 110, 122])}
+                      @change=${(e) => this._personChange(i, "color", e.target.value)}
+                    />
+                    <button @click=${() => this._personMove(i, -1)} title="nach oben" ?disabled=${i === 0}>↑</button>
+                    <button @click=${() => this._personMove(i, 1)} title="nach unten" ?disabled=${i === this._persons.length - 1}>↓</button>
+                    <button class="del" @click=${() => this._personRemove(i)} title="entfernen">✕</button>
+                  </div>`
+                )}
+              </div>
+              <button class="add" @click=${this._personAdd}>+ Zeile</button>`}
+        <label
+          >Rest-Zeile (alles ohne passende Person landet hier)
+          <input type="text" .value=${c.fallback_person || "Rest"} @change=${(e) => this._emit({ fallback_person: e.target.value.trim() || undefined })} />
+        </label>
+      </div>
+
+      <div class="sec">
+        <h3>Icons</h3>
+        <label>Icons aus Helfer (optional) ${sel(c.icons_entity || "", helperOpts, (v) => this._emit({ icons_entity: v || undefined }), "– hier in der Karte pflegen –")}</label>
+        ${c.icons_entity
+          ? html`<p class="hint">Die Icons kommen aus <code>${c.icons_entity}</code> – Einträge „Wort:Emoji".</p>`
+          : html`<div class="rows">
+                ${this._iconsEntries().map(
+                  ([k, v], i) => html`<div class="row">
+                    <input type="text" class="grow" .value=${k} @change=${(e) => this._iconChange(i, 0, e.target.value)} />
+                    <input type="text" class="emoji" .value=${v} @change=${(e) => this._iconChange(i, 1, e.target.value)} />
+                    <button class="del" @click=${() => this._iconRemove(i)} title="entfernen">✕</button>
+                  </div>`
+                )}
+              </div>
+              <button class="add" @click=${this._iconAdd}>+ Icon</button>`}
+      </div>
+
+      <div class="sec">
+        <h3>Aufgabenlisten</h3>
+        <div class="rows">
+          ${this._todos.map(
+            (t, i) => html`<div class="row wrap">
+              ${sel(t.entity, entOpts(["todo"]), (v) => this._todoChange(i, "entity", v), "– Liste wählen –")}
+              <input
+                type="text"
+                placeholder="Bezeichnung"
+                .value=${t.label === t.entity.split(".").pop() ? "" : t.label}
+                @change=${(e) => this._todoChange(i, "label", e.target.value)}
+              />
+              ${sel(
+                t.prefix ? "" : t.person || "",
+                [{ value: "", label: "Zeile aus dem Titel (Person|Icon: …)" }, ...this._persons.map((p) => ({ value: p.key, label: `feste Zeile: ${p.key}` }))],
+                (v) => this._todoRow(i, v)
+              )}
+              <input type="text" class="emoji" placeholder="Icon" .value=${t.icon} @change=${(e) => this._todoChange(i, "icon", e.target.value)} />
+              <label class="chk"><input type="checkbox" .checked=${t.readonly} @change=${(e) => this._todoChange(i, "readonly", e.target.checked)} /> nur anzeigen</label>
+              <button class="del" @click=${() => this._todoRemove(i)} title="entfernen">✕</button>
+            </div>`
+          )}
+        </div>
+        <button class="add" @click=${this._todoAdd}>+ Liste</button>
+        <label
+          >Erledigte Aufgaben nach Tagen entfernen (0 = nie)
+          <input
+            type="number"
+            min="0"
+            .value=${String(c.todo_cleanup_days ?? 7)}
+            @change=${(e) => this._emit({ todo_cleanup_days: Number(e.target.value) === 7 ? undefined : Number(e.target.value) })}
+          />
+        </label>
+        <p class="hint">
+          Titel „Person|Icon: Aufgabe" ordnet Zeile und Icon zu; ohne Präfix landet die Aufgabe in der Rest-Zeile. Listen mit fester Zeile
+          (z.B. Microsoft To Do) lassen den Titel unverändert.
+        </p>
+      </div>
+    `;
+  }
+
+  static styles = css`
+    :host {
+      display: block;
+      color: var(--primary-text-color);
+    }
+    .sec {
+      border: 1px solid var(--divider-color, rgba(127, 127, 127, 0.3));
+      border-radius: 10px;
+      padding: 10px 12px 12px;
+      margin-bottom: 12px;
+    }
+    h3 {
+      margin: 0 0 8px;
+      font-size: 15px;
+    }
+    label {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      font-size: 13px;
+      margin: 6px 0;
+      color: var(--secondary-text-color);
+    }
+    label.chk {
+      flex-direction: row;
+      align-items: center;
+      gap: 8px;
+      margin: 4px 0;
+    }
+    input,
+    select {
+      font: inherit;
+      color: var(--primary-text-color);
+      background: var(--card-background-color, transparent);
+      border: 1px solid var(--divider-color, rgba(127, 127, 127, 0.4));
+      border-radius: 6px;
+      padding: 6px 8px;
+      min-height: 34px;
+      box-sizing: border-box;
+    }
+    input[type="color"] {
+      width: 44px;
+      padding: 2px;
+    }
+    input[type="checkbox"] {
+      min-height: 0;
+      width: 18px;
+      height: 18px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0 12px;
+    }
+    .rows {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      margin: 6px 0;
+    }
+    .row {
+      display: flex;
+      gap: 6px;
+      align-items: center;
+    }
+    .row.wrap {
+      flex-wrap: wrap;
+      padding: 6px;
+      border: 1px dashed var(--divider-color, rgba(127, 127, 127, 0.3));
+      border-radius: 8px;
+    }
+    .row .grow {
+      flex: 1;
+      min-width: 0;
+    }
+    .row .emoji {
+      width: 80px;
+    }
+    .row select {
+      flex: 1;
+      min-width: 160px;
+    }
+    button {
+      font: inherit;
+      border: 1px solid var(--divider-color, rgba(127, 127, 127, 0.4));
+      background: transparent;
+      color: inherit;
+      border-radius: 6px;
+      min-width: 34px;
+      min-height: 34px;
+      cursor: pointer;
+    }
+    button[disabled] {
+      opacity: 0.4;
+      cursor: default;
+    }
+    button.del {
+      color: var(--error-color, #d32f2f);
+    }
+    button.add {
+      padding: 0 12px;
+      margin-top: 4px;
+    }
+    .hint {
+      font-size: 12px;
+      color: var(--secondary-text-color);
+      margin: 6px 0 0;
+    }
+    code {
+      font-size: 12px;
+    }
+  `;
+}
+customElements.define("family-week-planner-card-editor", FamilyWeekPlannerCardEditor);
 
 window.customCards = window.customCards || [];
 window.customCards.push({

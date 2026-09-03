@@ -39,6 +39,10 @@ The person prefix decides the row; the icon token maps to an emoji shown before 
 
 ## Configuration
 
+The card ships a **visual editor**: *Dashboard → Bearbeiten → Karte bearbeiten* shows rows (name
++ color), icons (word + emoji), to-do lists and all options as a form – no YAML needed. Everything
+below is the equivalent YAML.
+
 ```yaml
 type: custom:family-week-planner-card
 entity: calendar.your_family_calendar
@@ -70,6 +74,22 @@ icons:                        # optional, token -> emoji (case-insensitive match
 - `key` — matched case-insensitively against the person prefix in event titles.
 - `label` — optional display name (defaults to `key`).
 - `color` — `"r,g,b"` used as a translucent row background; `border`/`text` accent the row label.
+  One color is enough: give `border: "#1e88e5"` (or `color`) and the rest is derived.
+- The **fallback row** (`fallback_person`, default `Rest`) is always present – it is appended
+  automatically when missing – so every event or task has a place to land.
+
+### Rows maintained in Home Assistant (optional)
+
+Like the icons, the rows can come from a helper instead of the card config:
+
+```yaml
+persons_entity: input_select.familienplaner_zeilen
+```
+
+Each option is `Name`, `Name:#rrggbb`, `Name:r,g,b` or `Name:#rrggbb:Label`, in display order
+(reorder the options in the helper). When the entity exists and yields at least one entry it
+replaces `persons`; the fallback row is appended when missing. Use this if you want to edit rows
+from the phone app under *Helfer* – otherwise the visual editor is the simpler place.
 
 ### Touch-native dialog
 
