@@ -19,7 +19,7 @@ import { LitElement, html, css } from "lit";
 import { styleMap } from "lit/directives/style-map.js";
 import { classMap } from "lit/directives/class-map.js";
 
-const CARD_VERSION = "0.5.1";
+const CARD_VERSION = "0.6.0";
 
 const WEEKDAYS = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"];
 
@@ -82,6 +82,7 @@ class FamilyWeekPlannerCard extends LitElement {
     _kbShift: { state: true },
     _drag: { state: true },
     _toast: { state: true },
+    _rowH: { state: true },
   };
 
   constructor() {
@@ -92,12 +93,18 @@ class FamilyWeekPlannerCard extends LitElement {
     this._weekStart = mondayOf(new Date());
     this._hass = null;
     this._lastEntityUpdated = undefined;
+    this._iconsUpdated = undefined;
     this._kbShift = false;
     this._drag = null; // active drag: {item, el, x, y, grabDX, grabDY, w, target, hoverT, panelRect}
     this._pending = null; // pointer down, not lifted yet
     this._pressTimer = null;
     this._suppressClickUntil = 0;
     this._toast = null;
+    this._rowH = 210;
+    this._onResize = () => {
+      clearTimeout(this._resizeT);
+      this._resizeT = setTimeout(() => this._computeRowH(), 120);
+    };
   }
 
   connectedCallback() {
@@ -106,11 +113,58 @@ class FamilyWeekPlannerCard extends LitElement {
       if (e.key === "Escape" && this._drag) this._evPointerCancel();
     };
     window.addEventListener("keydown", this._onKey);
+    window.addEventListener("resize", this._onResize);
   }
   disconnectedCallback() {
     window.removeEventListener("keydown", this._onKey);
+    window.removeEventListener("resize", this._onResize);
+    if (window.visualViewport) window.visualViewport.removeEventListener("resize", this._onResize);
+    clearInterval(this._tick);
     this._endDrag();
     super.disconnectedCallback();
+  }
+  firstUpdated() {
+    this._computeRowH();
+    // second pass once fonts/layout have settled
+    setTimeout(() => this._computeRowH(), 350);
+    // viewport changes that don't fire window.resize (emulation, HA layout shifts): visualViewport
+    // plus a light periodic check against the last measurement.
+    if (window.visualViewport) window.visualViewport.addEventListener("resize", this._onResize);
+    this._tick = setInterval(() => {
+      if (!this.config || this.config.row_height !== "auto" || window.innerHeight < 200) return;
+      const m = this._lastMeasure;
+      const top = Math.max(0, this.getBoundingClientRect().top);
+      if (!m || m.vh !== window.innerHeight || m.vw !== window.innerWidth || Math.abs(m.top - top) > 2) {
+        this._computeRowH();
+      }
+    }, 2000);
+  }
+
+  /* ---------- responsive row height: fill the viewport below the card's top edge ---------- */
+  _computeRowH() {
+    if (!this.config) return;
+    if (typeof this.config.row_height === "number") {
+      if (this._rowH !== this.config.row_height) this._rowH = this.config.row_height;
+      return;
+    }
+    const sr = this.shadowRoot;
+    if (!sr) return;
+    if (window.innerHeight < 200) return; // not laid out yet (hidden pane / pre-layout): keep current value
+    const hostTop = Math.max(0, this.getBoundingClientRect().top);
+    this._lastMeasure = { vh: window.innerHeight, vw: window.innerWidth, top: hostTop };
+    const avail = window.innerHeight - hostTop - 12;
+    const h = (sel, fallback) => {
+      const el = sr.querySelector(sel);
+      return el ? el.getBoundingClientRect().height : fallback;
+    };
+    const fixed = h(".ctitle", 0) + h(".toolbar", 0) + h("thead", 66) + 20; // margins/paddings
+    const n = Math.max(1, this._persons().length);
+    // A rendered row is taller than the requested td height (cell padding + border): measure it.
+    const tr = sr.querySelector("tbody tr");
+    const overhead = tr ? Math.max(0, Math.round(tr.getBoundingClientRect().height - this._rowH)) : 15;
+    let rowH = Math.floor((avail - fixed) / n) - overhead - 1;
+    rowH = Math.max(this.config.row_min_height, Math.min(this.config.row_max_height, rowH));
+    if (rowH !== this._rowH) this._rowH = rowH;
   }
 
   setConfig(config) {
@@ -123,7 +177,13 @@ class FamilyWeekPlannerCard extends LitElement {
       persons: Array.isArray(config.persons) && config.persons.length ? config.persons : DEFAULT_PERSONS,
       icons: config.icons && Object.keys(config.icons).length ? config.icons : DEFAULT_ICONS,
       fallback_person: config.fallback_person || "Rest",
-      row_height: config.row_height ?? 210,
+      // Row height: a number (px) or "auto" (fill the viewport height, clamped to min/max).
+      row_height: config.row_height ?? "auto",
+      row_min_height: config.row_min_height ?? 64,
+      row_max_height: config.row_max_height ?? 420,
+      // Optional HA entity holding the icon map (input_select options or input_text value),
+      // each entry "Word:Emoji". When present it replaces `icons`.
+      icons_entity: config.icons_entity || null,
       show_toolbar: config.show_toolbar !== false,
       default_icon: config.default_icon || "",
       default_start: config.default_start || "09:00",
@@ -152,6 +212,15 @@ class FamilyWeekPlannerCard extends LitElement {
       this._lastEntityUpdated = lu;
       this._reload();
     }
+    // Icon map maintained in HA (input_select / input_text): re-render when it changes.
+    if (this.config.icons_entity) {
+      const ie = hass.states[this.config.icons_entity];
+      const iu = ie ? ie.last_updated : "missing";
+      if (iu !== this._iconsUpdated) {
+        this._iconsUpdated = iu;
+        this.requestUpdate();
+      }
+    }
   }
   get hass() {
     return this._hass;
@@ -161,16 +230,32 @@ class FamilyWeekPlannerCard extends LitElement {
     return this.config.persons;
   }
   _icons() {
+    // Prefer an icon map maintained in Home Assistant: an input_select whose options are
+    // "Word:Emoji" entries, or an input_text whose value lists them (comma/newline separated).
+    const ent = this.config.icons_entity;
+    const st = ent && this._hass && this._hass.states[ent];
+    if (st) {
+      let list = [];
+      if (st.attributes && Array.isArray(st.attributes.options)) list = st.attributes.options;
+      else if (typeof st.state === "string") list = st.state.split(/[\n,;]+/);
+      const map = {};
+      for (const raw of list) {
+        const m = String(raw).trim().match(/^([^:=]+?)\s*[:=]\s*(.+)$/);
+        if (m) map[m[1].trim()] = m[2].trim();
+      }
+      if (Object.keys(map).length) return map;
+    }
     return this.config.icons;
   }
   _iconEmoji(key) {
     if (!key) return "";
-    const k = Object.keys(this.config.icons).find((x) => x.toLowerCase() === String(key).toLowerCase());
-    return k ? this.config.icons[k] : "";
+    const icons = this._icons();
+    const k = Object.keys(icons).find((x) => x.toLowerCase() === String(key).toLowerCase());
+    return k ? icons[k] : "";
   }
   _normIconKey(key) {
     if (!key) return "";
-    const k = Object.keys(this.config.icons).find((x) => x.toLowerCase() === String(key).toLowerCase());
+    const k = Object.keys(this._icons()).find((x) => x.toLowerCase() === String(key).toLowerCase());
     return k || key;
   }
 
@@ -738,7 +823,7 @@ class FamilyWeekPlannerCard extends LitElement {
     const days = [...Array(7)].map((_, i) => addDays(weekStart, i));
     const todayCol = this._todayCol();
     const items = this._items();
-    const rowH = `${this.config.row_height}px`;
+    const rowH = `${this._rowH}px`;
 
     return html`
       <ha-card>
@@ -996,6 +1081,15 @@ class FamilyWeekPlannerCard extends LitElement {
   }
   updated(changed) {
     super.updated(changed);
+    // Auto row height: re-measure whenever viewport or our top offset changed since the last
+    // measurement (covers late layout, HA header toggling, emulated viewport changes).
+    if (this.config && this.config.row_height === "auto" && window.innerHeight >= 200) {
+      const m = this._lastMeasure;
+      const top = Math.max(0, this.getBoundingClientRect().top);
+      if (!m || m.vh !== window.innerHeight || m.vw !== window.innerWidth || Math.abs(m.top - top) > 2) {
+        this._computeRowH();
+      }
+    }
     // Position the wheels once when a time picker opens (not on every re-render).
     const pick = this._dialog && this._dialog.pick;
     if (!pick) {
