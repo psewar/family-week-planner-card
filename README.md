@@ -43,7 +43,11 @@ The person prefix decides the row; the icon token maps to an emoji shown before 
 type: custom:family-week-planner-card
 entity: calendar.your_family_calendar
 title: Familienwoche          # optional
-row_height: 210               # optional, px per person row (portrait screens)
+row_height: auto              # optional: "auto" (default) fills the viewport height below the card,
+                              #   clamped by row_min_height / row_max_height; or a fixed px number
+row_min_height: 64            # optional
+row_max_height: 420           # optional
+icons_entity: input_select.familienplaner_icons   # optional, see "Icons maintained in HA"
 show_toolbar: true            # optional, week navigation + "Heute"
 keyboard: auto                # optional: true | false | auto — built-in on-screen keyboard for the
                               #   title field (auto = show on touch devices). Set false if the OS
@@ -88,6 +92,20 @@ drop_minute_step: 5           # optional, minute step of the flyout (5 → :00 :
 
 While dragging, the upper/lower half of an hour row picks :00/:30. Rest on the hour for
 `drop_minutes_delay` and a minutes column flies out next to it — drop there for an exact time.
+
+### Icons maintained in Home Assistant
+
+Instead of editing the dashboard YAML, keep the `Word:Emoji` icon list in a helper and point the
+card at it with `icons_entity`. Two helper types work:
+
+- **Dropdown (`input_select`)** — recommended: each *option* is one entry, e.g. `Sport:🏋️`.
+  Edit the list under *Settings → Devices & services → Helpers*. No length limit.
+- **Text (`input_text`)** — one string with entries separated by comma or newline
+  (`Sport:🏋️, Tanzen:💃`); limited to 255 characters.
+
+When the entity exists and yields at least one entry it **replaces** the built-in / `icons:` map;
+the card re-renders as soon as the helper changes. Matching against event titles stays
+case-insensitive.
 
 ## Companion: `fwp-reload-card`
 

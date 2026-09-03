@@ -116,6 +116,12 @@
         language: "de",
         states: {
           "calendar.familie": { state: "on", last_updated: new Date().toISOString(), attributes: {} },
+          // icon map maintained as an input_select helper ("Word:Emoji" options)
+          "input_select.familienplaner_icons": {
+            state: "Sport:🏋️",
+            last_updated: new Date().toISOString(),
+            attributes: { options: ["Sport:🏋️", "Tanzen:💃", "Singen:🎵", "Chor:🎶", "Arzt:🩺", "Schule:🎒", "Ausflug:🧭", "Mittag:🍴", "Ferien:🏖️"] },
+          },
         },
         localize: (k) => k,
         async callApi(method, path) {
@@ -172,6 +178,7 @@
         title: "Familienwoche",
         entity: "calendar.familie",
         keyboard: true,
+        icons_entity: "input_select.familienplaner_icons",
         persons: [
           { key: "Familie", color: "126,87,194", border: "#7e57c2", text: "#c9b3f0" },
           { key: "Anna", color: "30,136,229", border: "#1e88e5", text: "#8ecbff" },
