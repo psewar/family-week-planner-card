@@ -19,7 +19,7 @@ import { LitElement, html, css } from "lit";
 import { styleMap } from "lit/directives/style-map.js";
 import { classMap } from "lit/directives/class-map.js";
 
-const CARD_VERSION = "0.7.0";
+const CARD_VERSION = "0.8.0";
 
 const WEEKDAYS = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"];
 
@@ -134,6 +134,144 @@ function recurLabel(key, rrule) {
   return hit ? hit.label : key;
 }
 
+/* ---------- to-do lists: tasks shown in the grid ---------- */
+const todayStart = () => {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  return d;
+};
+function normalizeTodoConfig(config) {
+  let raw = config.todo_entities ?? (config.todo_entity ? [config.todo_entity] : []);
+  if (!Array.isArray(raw)) raw = [raw];
+  return raw
+    .map((t) => (typeof t === "string" ? { entity: t } : t))
+    .filter((t) => t && typeof t.entity === "string")
+    .map((t) => ({
+      entity: t.entity,
+      label: t.label || t.entity.split(".").pop(),
+      person: t.person || null, // fixed row for lists that don't use the "Person|Icon:" convention
+      icon: t.icon || "",
+      prefix: t.prefix !== false, // parse/write "Person|Icon: Title" in the item summary
+      readonly: !!t.readonly,
+    }));
+}
+// A task's recurrence lives in its description as a "↻ …" line (human readable, German):
+//   ↻ täglich · ↻ alle 3 Tage · ↻ wöchentlich · ↻ alle 2 Wochen · ↻ monatlich · ↻ jährlich · ↻ Mo–Fr · ↻ Mo, Do
+// RFC 5545 RRULE strings are accepted too. Internal form: {freq, interval, byday:[0..6]} (0 = Monday).
+const TASK_RECUR = [
+  { key: "daily", label: "Täglich", rule: { freq: "DAILY", interval: 1 } },
+  { key: "every2", label: "Alle 2 Tage", rule: { freq: "DAILY", interval: 2 } },
+  { key: "every3", label: "Alle 3 Tage", rule: { freq: "DAILY", interval: 3 } },
+  { key: "weekly", label: "Wöchentlich", rule: { freq: "WEEKLY", interval: 1 } },
+  { key: "biweekly", label: "Alle 2 Wochen", rule: { freq: "WEEKLY", interval: 2 } },
+  { key: "monthly", label: "Monatlich", rule: { freq: "MONTHLY", interval: 1 } },
+  { key: "weekdays", label: "Mo–Fr", rule: { freq: "WEEKLY", interval: 1, byday: [0, 1, 2, 3, 4] } },
+];
+const WD_SHORT = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"];
+function parseTaskRule(text) {
+  if (!text) return null;
+  const s = String(text)
+    .trim()
+    .replace(/^(↻|wiederholen:|repeat:)\s*/i, "")
+    .trim();
+  if (!s) return null;
+  const low = s.toLowerCase().replace(/ä/g, "ae").replace(/ö/g, "oe").replace(/ü/g, "ue");
+  let m;
+  if (/^freq=/i.test(s)) {
+    const p = parseRRule(s);
+    const rule = { freq: p.FREQ, interval: Math.max(1, Number(p.INTERVAL || 1)) };
+    if (p.BYDAY) rule.byday = p.BYDAY.split(",").map((x) => BYDAY.indexOf(x)).filter((i) => i >= 0);
+    return ["DAILY", "WEEKLY", "MONTHLY", "YEARLY"].includes(rule.freq) ? rule : null;
+  }
+  if (/^(taeglich|daily|jeden tag)$/.test(low)) return { freq: "DAILY", interval: 1 };
+  if ((m = low.match(/^alle (\d+) tage?$/))) return { freq: "DAILY", interval: Number(m[1]) };
+  if (/^(woechentlich|weekly|jede woche)$/.test(low)) return { freq: "WEEKLY", interval: 1 };
+  if ((m = low.match(/^alle (\d+) wochen?$/))) return { freq: "WEEKLY", interval: Number(m[1]) };
+  if (/^(monatlich|monthly|jeden monat)$/.test(low)) return { freq: "MONTHLY", interval: 1 };
+  if ((m = low.match(/^alle (\d+) monate?$/))) return { freq: "MONTHLY", interval: Number(m[1]) };
+  if (/^(jaehrlich|yearly|jedes jahr)$/.test(low)) return { freq: "YEARLY", interval: 1 };
+  if (/^(mo\s*[–-]\s*fr|werktags|weekdays)$/.test(low)) return { freq: "WEEKLY", interval: 1, byday: [0, 1, 2, 3, 4] };
+  const tokens = low.split(/[,\s/+]+/).filter(Boolean);
+  const days = tokens.map((x) => WD_SHORT.findIndex((w) => w.toLowerCase() === x.slice(0, 2))).filter((i) => i >= 0);
+  if (tokens.length && days.length === tokens.length) return { freq: "WEEKLY", interval: 1, byday: [...new Set(days)].sort() };
+  return null;
+}
+function ruleToText(rule) {
+  if (!rule) return "";
+  const n = rule.interval || 1;
+  if (rule.freq === "WEEKLY" && rule.byday && rule.byday.length) {
+    const b = [...rule.byday].sort();
+    if (b.join() === "0,1,2,3,4") return "Mo–Fr";
+    return b.map((i) => WD_SHORT[i]).join(", ");
+  }
+  if (rule.freq === "DAILY") return n === 1 ? "täglich" : `alle ${n} Tage`;
+  if (rule.freq === "WEEKLY") return n === 1 ? "wöchentlich" : `alle ${n} Wochen`;
+  if (rule.freq === "MONTHLY") return n === 1 ? "monatlich" : `alle ${n} Monate`;
+  if (rule.freq === "YEARLY") return "jährlich";
+  return "";
+}
+function taskRuleKey(rule) {
+  if (!rule) return "";
+  const hit = TASK_RECUR.find((r) => ruleToText(r.rule) === ruleToText(rule));
+  return hit ? hit.key : "custom";
+}
+function ruleFromKey(key) {
+  const hit = TASK_RECUR.find((r) => r.key === key);
+  return hit ? hit.rule : null;
+}
+// Next due date strictly after `from` (a local-midnight Date).
+function nextDue(from, rule) {
+  const n = Math.max(1, rule.interval || 1);
+  if (rule.freq === "WEEKLY" && rule.byday && rule.byday.length) {
+    for (let i = 1; i <= 7; i++) {
+      const d = addDays(from, i);
+      const wd = (d.getDay() + 6) % 7;
+      if (rule.byday.includes(wd)) {
+        // interval > 1: once the week wraps, skip (interval - 1) further weeks
+        if (n > 1 && wd <= (from.getDay() + 6) % 7) return addDays(d, 7 * (n - 1));
+        return d;
+      }
+    }
+    return addDays(from, 7 * n);
+  }
+  if (rule.freq === "DAILY") return addDays(from, n);
+  if (rule.freq === "WEEKLY") return addDays(from, 7 * n);
+  const d = new Date(from);
+  if (rule.freq === "MONTHLY") {
+    const day = d.getDate();
+    d.setDate(1);
+    d.setMonth(d.getMonth() + n);
+    d.setDate(Math.min(day, new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate()));
+    return d;
+  }
+  if (rule.freq === "YEARLY") {
+    d.setFullYear(d.getFullYear() + n);
+    return d;
+  }
+  return addDays(from, 1);
+}
+// Split a task description into the recurrence rule and the remaining free text.
+function splitDescription(desc) {
+  const lines = String(desc || "").split(/\r?\n/);
+  let rule = null;
+  const rest = [];
+  for (const l of lines) {
+    const t = l.trim();
+    if (!rule && /^(↻|wiederholen:|repeat:)/i.test(t)) {
+      rule = parseTaskRule(t);
+      if (rule) continue;
+    }
+    rest.push(l);
+  }
+  return { rule, rest: rest.join("\n").trim() };
+}
+function joinDescription(rest, rule) {
+  const parts = [];
+  if (rule) parts.push("↻ " + ruleToText(rule));
+  if (rest) parts.push(rest);
+  return parts.join("\n");
+}
+
 class FamilyWeekPlannerCard extends LitElement {
   static properties = {
     _weekStart: { state: true },
@@ -145,6 +283,7 @@ class FamilyWeekPlannerCard extends LitElement {
     _toast: { state: true },
     _rowH: { state: true },
     _scope: { state: true },
+    _todos: { state: true },
   };
 
   constructor() {
@@ -163,6 +302,10 @@ class FamilyWeekPlannerCard extends LitElement {
     this._suppressClickUntil = 0;
     this._toast = null;
     this._scope = null; // pending "this / this and future / all" question for a series
+    this._todos = {}; // entity_id -> to-do items
+    this._todoSubs = [];
+    this._todoSig = undefined;
+    this._cleaned = new Set();
     this._rowH = 210;
     this._onResize = () => {
       clearTimeout(this._resizeT);
@@ -186,6 +329,7 @@ class FamilyWeekPlannerCard extends LitElement {
     if (window.visualViewport) window.visualViewport.removeEventListener("resize", this._onResize);
     clearInterval(this._tick);
     this._endDrag();
+    this._todoUnsubscribe();
     super.disconnectedCallback();
   }
   firstUpdated() {
@@ -262,6 +406,13 @@ class FamilyWeekPlannerCard extends LitElement {
       // While dragging: rest on an hour row this long (ms) to open the minutes flyout (step in minutes).
       drop_minutes_delay: config.drop_minutes_delay ?? 1600,
       drop_minute_step: config.drop_minute_step ?? 5,
+      // To-do lists shown in the grid: a task lands on its due day (overdue ones on today) with a
+      // checkbox; completing a recurring task ("↻ …" line in its description) adds the next one.
+      todo_entities: normalizeTodoConfig(config),
+      // Completed tasks older than this many days are removed from the list (0 = never).
+      todo_cleanup_days: config.todo_cleanup_days ?? 7,
+      // What a tap on an empty cell creates first: "event" or "task".
+      default_kind: config.default_kind === "task" ? "task" : "event",
     };
   }
 
@@ -276,6 +427,17 @@ class FamilyWeekPlannerCard extends LitElement {
     } else if (lu !== this._lastEntityUpdated) {
       this._lastEntityUpdated = lu;
       this._reload();
+    }
+    // To-do lists: live subscription when the connection offers it, plus a reload whenever
+    // the list entity changes (covers backends without a subscription).
+    if (this.config.todo_entities.length) {
+      this._todoSubscribe(hass);
+      const sig = this.config.todo_entities.map((t) => (hass.states[t.entity] || {}).last_updated || "missing").join("|");
+      if (sig !== this._todoSig) {
+        const first = this._todoSig === undefined;
+        this._todoSig = sig;
+        if (!first) this._loadTodos();
+      }
     }
     // Icon map maintained in HA (input_select / input_text): re-render when it changes.
     if (this.config.icons_entity) {
@@ -324,11 +486,130 @@ class FamilyWeekPlannerCard extends LitElement {
     return k || key;
   }
 
+  /* ---------- to-do lists ---------- */
+  _svc(list, service, data) {
+    return this._hass.callService("todo", service, data, { entity_id: list.entity });
+  }
+  async _loadTodos() {
+    const lists = this.config.todo_entities;
+    if (!lists.length || !this._hass) return;
+    const out = { ...this._todos };
+    await Promise.all(
+      lists.map(async (t) => {
+        try {
+          const r = await this._hass.callWS({ type: "todo/item/list", entity_id: t.entity });
+          out[t.entity] = (r && r.items) || [];
+        } catch (e) {
+          // eslint-disable-next-line no-console
+          console.error("family-week-planner-card: failed to load to-do list", t.entity, e);
+          out[t.entity] = out[t.entity] || [];
+        }
+      })
+    );
+    this._todos = out;
+    this._cleanupCompleted();
+  }
+  _todoSubscribe(hass) {
+    if (this._todoSubs.length || !hass.connection || typeof hass.connection.subscribeMessage !== "function") return;
+    for (const t of this.config.todo_entities) {
+      try {
+        const p = hass.connection.subscribeMessage(
+          (msg) => {
+            if (msg && Array.isArray(msg.items)) this._todos = { ...this._todos, [t.entity]: msg.items };
+          },
+          { type: "todo/item/subscribe", entity_id: t.entity }
+        );
+        this._todoSubs.push(p);
+      } catch (e) {
+        /* no live updates: the last_updated watcher in `set hass` still reloads */
+      }
+    }
+  }
+  _todoUnsubscribe() {
+    for (const p of this._todoSubs) {
+      Promise.resolve(p)
+        .then((unsub) => typeof unsub === "function" && unsub())
+        .catch(() => {});
+    }
+    this._todoSubs = [];
+  }
+  _cleanupCompleted() {
+    // Keep the list tidy: completed tasks whose due date is older than `todo_cleanup_days` go away
+    // (the card shows completed tasks struck through until then).
+    const days = Number(this.config.todo_cleanup_days);
+    if (!days || days <= 0 || !this._hass) return;
+    const cutoff = addDays(todayStart(), -days);
+    for (const t of this.config.todo_entities) {
+      if (t.readonly) continue;
+      for (const item of this._todos[t.entity] || []) {
+        if (item.status !== "completed" || !item.due) continue;
+        const key = `${t.entity}/${item.uid}`;
+        if (this._cleaned.has(key)) continue;
+        if (parseDate(String(item.due).slice(0, 10)) < cutoff) {
+          this._cleaned.add(key);
+          this._svc(t, "remove_item", { item: item.uid }).catch(() => {});
+        }
+      }
+    }
+  }
+  async _toggleTask(it) {
+    const { list, raw } = it;
+    this._toast = { text: it.done ? "Wieder offen …" : "Erledigt …" };
+    try {
+      if (!it.done) {
+        await this._svc(list, "update_item", { item: raw.uid, status: "completed" });
+        if (it.rule) {
+          // recurring: create the next occurrence. Overdue tasks continue from today, so a late
+          // completion doesn't produce a backlog.
+          const due = raw.due ? parseDate(String(raw.due).slice(0, 10)) : todayStart();
+          const base = due < todayStart() ? todayStart() : due;
+          const data = { item: raw.summary, due_date: ymd(nextDue(base, it.rule)) };
+          if (raw.description) data.description = raw.description;
+          await this._svc(list, "add_item", data);
+        }
+      } else {
+        await this._svc(list, "update_item", { item: raw.uid, status: "needs_action" });
+        if (it.rule) {
+          // undo: drop the follow-up that was created on completion (same title, still open)
+          const dup = (this._todos[list.entity] || []).find(
+            (x) => x.uid !== raw.uid && x.summary === raw.summary && x.status !== "completed"
+          );
+          if (dup) await this._svc(list, "remove_item", { item: dup.uid });
+        }
+      }
+      await this._loadTodos();
+      this._toast = null;
+    } catch (e) {
+      this._toast = { text: "Aufgabe konnte nicht geändert werden: " + this._errText(e), error: true };
+      setTimeout(() => (this._toast = null), 4500);
+    }
+  }
+  async _moveTask(d) {
+    const it = d.item;
+    const day = addDays(this._weekStart, d.target.day);
+    if (d.target.day === it.dayOffset && d.target.person === it.personKey && !it.overdue && !it.undated) return;
+    const data = { item: it.raw.uid, due_date: ymd(day) };
+    if (it.list.prefix && d.target.person !== it.personKey) {
+      const p = this._parseSummary(it.raw.summary);
+      data.rename = this._composeSummary(d.target.person, p.iconKey, p.title);
+    }
+    this._toast = { text: "Verschiebe …" };
+    try {
+      await this._svc(it.list, "update_item", data);
+      await this._loadTodos();
+      this._toast = null;
+    } catch (e) {
+      this._toast = { text: "Verschieben fehlgeschlagen: " + this._errText(e), error: true };
+      setTimeout(() => (this._toast = null), 4500);
+    }
+  }
+
   async _reload() {
     if (!this._hass || !this.config) return;
     const start = this._weekStart;
     const end = addDays(start, 7);
     this._loading = true;
+    const todosP = this._loadTodos();
     try {
       const path = `calendars/${this.config.entity}?start=${encodeURIComponent(
         start.toISOString()
@@ -340,6 +621,7 @@ class FamilyWeekPlannerCard extends LitElement {
       console.error("family-week-planner-card: failed to load events", e);
       this._events = [];
     } finally {
+      await todosP;
       this._loading = false;
     }
   }
@@ -388,6 +670,7 @@ class FamilyWeekPlannerCard extends LitElement {
       if (off < 0 || off > 6) continue;
       const { personKey, iconKey, title } = this._parseSummary(e.summary);
       out.push({
+        kind: "event",
         dayOffset: off,
         personKey,
         emoji: this._iconEmoji(iconKey),
@@ -398,8 +681,59 @@ class FamilyWeekPlannerCard extends LitElement {
         raw: e,
       });
     }
-    // stable-ish sort: all-day first, then by time
-    out.sort((a, b) => (a.allday === b.allday ? a.time.localeCompare(b.time) : a.allday ? -1 : 1));
+    // Tasks from the to-do lists: due day = column; overdue and undated open tasks go to today.
+    const ti = this._todayCol();
+    const todayIdx = ti >= 0 && ti <= 6 ? ti : -1;
+    const t0 = todayStart();
+    for (const list of this.config.todo_entities) {
+      for (const item of this._todos[list.entity] || []) {
+        const done = item.status === "completed";
+        const due = item.due ? parseDate(String(item.due).slice(0, 10)) : null;
+        let off = due ? dayIndex(due, this._weekStart) : -1;
+        let overdue = false;
+        const undated = !due;
+        if (!done) {
+          if (!due) {
+            if (todayIdx < 0) continue;
+            off = todayIdx;
+          } else if (due < t0 && todayIdx >= 0) {
+            off = todayIdx;
+            overdue = true;
+          }
+        } else if (!due) continue;
+        if (off < 0 || off > 6) continue;
+        let personKey, iconKey, title;
+        if (list.prefix) {
+          ({ personKey, iconKey, title } = this._parseSummary(item.summary));
+          if (personKey === this.config.fallback_person && list.person) personKey = list.person;
+          if (!iconKey && list.icon) iconKey = this._normIconKey(list.icon);
+        } else {
+          personKey = list.person || this.config.fallback_person;
+          iconKey = this._normIconKey(list.icon);
+          title = item.summary;
+        }
+        const { rule } = splitDescription(item.description);
+        out.push({
+          kind: "task",
+          list,
+          dayOffset: off,
+          personKey,
+          emoji: this._iconEmoji(iconKey),
+          time: "",
+          title,
+          allday: true,
+          recurring: !!rule,
+          rule,
+          done,
+          overdue,
+          undated,
+          raw: item,
+        });
+      }
+    }
+    // order inside a cell: all-day events, tasks, timed events by time
+    const rank = (x) => (x.kind === "task" ? 1 : x.allday ? 0 : 2);
+    out.sort((a, b) => rank(a) - rank(b) || a.time.localeCompare(b.time) || (a.done === b.done ? 0 : a.done ? 1 : -1));
     return out;
   }
 
@@ -420,6 +754,12 @@ class FamilyWeekPlannerCard extends LitElement {
   _openCreate(person, day) {
     this._dialog = {
       mode: "create",
+      kind: this.config.todo_entities.length ? this.config.default_kind : "event",
+      list: (this.config.todo_entities[0] || {}).entity || null,
+      trecur: "",
+      trule: null,
+      descRest: "",
+      done: false,
       person: person.key,
       iconKey: this.config.default_icon,
       title: "",
@@ -437,7 +777,41 @@ class FamilyWeekPlannerCard extends LitElement {
       error: "",
     };
   }
+  _openEditTask(it) {
+    const raw = it.raw;
+    const list = it.list;
+    if (list.readonly) return;
+    const parsed = list.prefix
+      ? this._parseSummary(raw.summary)
+      : { personKey: it.personKey, iconKey: this._normIconKey(list.icon), title: raw.summary };
+    const { rule, rest } = splitDescription(raw.description);
+    this._dialog = {
+      mode: "edit",
+      kind: "task",
+      list: list.entity,
+      person: parsed.personKey,
+      iconKey: parsed.iconKey,
+      title: parsed.title,
+      allday: true,
+      date: raw.due ? String(raw.due).slice(0, 10) : ymd(new Date()),
+      start: this.config.default_start,
+      end: this.config.default_end,
+      uid: raw.uid,
+      recurrence_id: null,
+      rrule: "",
+      recur: "",
+      recurOrig: "",
+      trecur: taskRuleKey(rule),
+      trule: rule,
+      descRest: rest,
+      done: raw.status === "completed",
+      pick: null,
+      saving: false,
+      error: "",
+    };
+  }
   _openEdit(it) {
+    if (it.kind === "task") return this._openEditTask(it);
     const raw = it.raw;
     const startRaw = raw.start.dateTime || raw.start.date;
     const endRaw = raw.end && (raw.end.dateTime || raw.end.date);
@@ -496,7 +870,53 @@ class FamilyWeekPlannerCard extends LitElement {
     return { event };
   }
 
+  async _saveTask() {
+    const d = this._dialog;
+    const title = (d.title || "").trim();
+    if (!title) {
+      this._set("error", "Bitte einen Titel eingeben.");
+      return;
+    }
+    const lists = this.config.todo_entities;
+    const list = lists.find((t) => t.entity === d.list) || lists[0];
+    if (!list) {
+      this._set("error", "Keine To-do-Liste konfiguriert.");
+      return;
+    }
+    const summary = list.prefix ? this._composeSummary(d.person, d.iconKey, title) : title;
+    const rule = d.trecur === "custom" ? d.trule : ruleFromKey(d.trecur);
+    const description = joinDescription(d.descRest, rule);
+    this._dialog = { ...d, saving: true, error: "" };
+    try {
+      if (d.mode === "create") {
+        const data = { item: summary, due_date: d.date };
+        if (description) data.description = description;
+        await this._svc(list, "add_item", data);
+      } else {
+        await this._svc(list, "update_item", { item: d.uid, rename: summary, due_date: d.date, description });
+      }
+      this._closeDialog();
+      await this._loadTodos();
+    } catch (e) {
+      this._dialog = { ...this._dialog, saving: false, error: this._errText(e) };
+    }
+  }
+  async _deleteTask() {
+    const d = this._dialog;
+    const list = this.config.todo_entities.find((t) => t.entity === d.list);
+    if (!list || !d.uid) return;
+    this._dialog = { ...d, saving: true, error: "" };
+    try {
+      await this._svc(list, "remove_item", { item: d.uid });
+      this._closeDialog();
+      await this._loadTodos();
+    } catch (e) {
+      this._dialog = { ...this._dialog, saving: false, error: this._errText(e) };
+    }
+  }
+
   async _save() {
+    if (this._dialog && this._dialog.kind === "task") return this._saveTask();
     const built = this._buildEventPayload();
     if (built.error) {
       this._set("error", built.error);
@@ -605,6 +1025,7 @@ class FamilyWeekPlannerCard extends LitElement {
 
   async _delete() {
     const d = this._dialog;
+    if (d.kind === "task") return this._deleteTask();
     if (!d.uid) {
       this._set("error", "Dieser Termin hat keine ID und kann nicht gelöscht werden.");
       return;
@@ -659,6 +1080,7 @@ class FamilyWeekPlannerCard extends LitElement {
   _evPointerDown(e, it, el) {
     if (!this.config.drag || this._dialog) return;
     if (e.button !== undefined && e.button !== 0) return;
+    if (it.kind === "task" && it.list.readonly) return;
     if (this._drag || this._pending) this._endDrag(); // stale state from a lost pointer -> reset
     const r = el.getBoundingClientRect();
     const p = {
@@ -801,7 +1223,8 @@ class FamilyWeekPlannerCard extends LitElement {
         const day = Number(td.dataset.day);
         if (!target || target.person !== person || target.day !== day) {
           target = { person, day };
-          panelRect = td.getBoundingClientRect();
+          // tasks have no time: no drop-time panel, just the day/person cell
+          panelRect = d.item.kind === "task" ? null : td.getBoundingClientRect();
         }
         hoverT = "keep";
       } else {
@@ -822,6 +1245,7 @@ class FamilyWeekPlannerCard extends LitElement {
 
   async _performDrop(d) {
     const it = d.item;
+    if (it.kind === "task") return this._moveTask(d);
     const raw = it.raw;
     const t = d.hoverT || "keep";
     const samePlace = d.target.day === it.dayOffset && d.target.person === it.personKey && t === "keep";
@@ -901,7 +1325,12 @@ class FamilyWeekPlannerCard extends LitElement {
 
   _isLifted(it) {
     const d = this._drag;
-    return !!d && d.item.raw.uid === it.raw.uid && (d.item.raw.recurrence_id || null) === (it.raw.recurrence_id || null);
+    return (
+      !!d &&
+      d.item.kind === it.kind &&
+      d.item.raw.uid === it.raw.uid &&
+      (d.item.raw.recurrence_id || null) === (it.raw.recurrence_id || null)
+    );
   }
 
   _renderGhost() {
@@ -913,13 +1342,15 @@ class FamilyWeekPlannerCard extends LitElement {
       const day = addDays(this._weekStart, d.target.day);
       const person = this._persons().find((p) => p.key === d.target.person);
       const when =
-        d.hoverT === "allday"
-          ? "ganztags"
-          : !d.hoverT || d.hoverT === "keep"
-            ? it.allday
-              ? "ganztags"
-              : `${it.time} (Zeit behalten)`
-            : d.hoverT;
+        it.kind === "task"
+          ? "fällig"
+          : d.hoverT === "allday"
+            ? "ganztags"
+            : !d.hoverT || d.hoverT === "keep"
+              ? it.allday
+                ? "ganztags"
+                : `${it.time} (Zeit behalten)`
+              : d.hoverT;
       tgt = `→ ${WEEKDAYS[d.target.day].slice(0, 2)} ${fmtDM(day)} · ${person ? person.label || person.key : d.target.person} · ${when}`;
     }
     return html`<div
@@ -1037,21 +1468,53 @@ class FamilyWeekPlannerCard extends LitElement {
                       }}
                       title="Neuen Termin für ${p.label || p.key} am ${fmtDM(d)} anlegen"
                     >
-                      ${cellItems.map(
-                        (it) => html`<div
-                          class=${classMap({ ev: true, lifted: this._isLifted(it) })}
-                          @pointerdown=${(e) => this._evPointerDown(e, it, e.currentTarget)}
-                          @dragstart=${(e) => e.preventDefault()}
-                          @contextmenu=${(e) => e.preventDefault()}
-                          @click=${(e) => {
-                            e.stopPropagation();
-                            if (Date.now() < this._suppressClickUntil) return;
-                            this._openEdit(it);
-                          }}
-                        >
-                          ${it.recurring ? html`<span class="rec" title="Serientermin">↻</span>` : ""}
-                          ${it.emoji ? html`${it.emoji} ` : ""}${it.time ? html`<b>${it.time}</b> ` : ""}${it.title}
-                        </div>`
+                      ${cellItems.map((it) =>
+                        it.kind === "task"
+                          ? html`<div
+                              class=${classMap({
+                                ev: true,
+                                task: true,
+                                done: it.done,
+                                overdue: it.overdue,
+                                lifted: this._isLifted(it),
+                              })}
+                              @pointerdown=${(e) => this._evPointerDown(e, it, e.currentTarget)}
+                              @dragstart=${(e) => e.preventDefault()}
+                              @contextmenu=${(e) => e.preventDefault()}
+                              @click=${(e) => {
+                                e.stopPropagation();
+                                if (Date.now() < this._suppressClickUntil) return;
+                                this._openEdit(it);
+                              }}
+                              title=${it.overdue ? `Überfällig seit ${fmtDM(parseDate(String(it.raw.due).slice(0, 10)))}` : it.undated ? "Ohne Fälligkeitsdatum" : ""}
+                            >
+                              <span
+                                class="cb"
+                                title=${it.done ? "Wieder öffnen" : "Erledigt"}
+                                @pointerdown=${(e) => e.stopPropagation()}
+                                @click=${(e) => {
+                                  e.stopPropagation();
+                                  this._toggleTask(it);
+                                }}
+                                >${it.done ? "☑" : "☐"}</span
+                              >
+                              ${it.recurring ? html`<span class="rec" title="Wiederkehrende Aufgabe: ${ruleToText(it.rule)}">↻</span>` : ""}
+                              <span class="tt">${it.overdue ? html`<span class="od">!</span>` : ""}${it.emoji ? html`${it.emoji} ` : ""}${it.title}</span>
+                            </div>`
+                          : html`<div
+                              class=${classMap({ ev: true, lifted: this._isLifted(it) })}
+                              @pointerdown=${(e) => this._evPointerDown(e, it, e.currentTarget)}
+                              @dragstart=${(e) => e.preventDefault()}
+                              @contextmenu=${(e) => e.preventDefault()}
+                              @click=${(e) => {
+                                e.stopPropagation();
+                                if (Date.now() < this._suppressClickUntil) return;
+                                this._openEdit(it);
+                              }}
+                            >
+                              ${it.recurring ? html`<span class="rec" title="Serientermin">↻</span>` : ""}
+                              ${it.emoji ? html`${it.emoji} ` : ""}${it.time ? html`<b>${it.time}</b> ` : ""}${it.title}
+                            </div>`
                       )}
                     </td>`;
                   })}
@@ -1293,8 +1756,107 @@ class FamilyWeekPlannerCard extends LitElement {
     </div>`;
   }
 
+  _renderKindChips() {
+    const d = this._dialog;
+    return html`<div class="chips kind">
+      <button class="chip ${d.kind !== "task" ? "on" : ""}" @click=${() => this._set("kind", "event")}>📅 Termin</button>
+      <button class="chip ${d.kind === "task" ? "on" : ""}" @click=${() => this._set("kind", "task")}>☐ Aufgabe</button>
+    </div>`;
+  }
+  _renderPersonIconChips(d) {
+    const persons = this._persons();
+    const icons = this._icons();
+    const iconKeys = Object.keys(icons);
+    return html`<div class="fld">
+        <span class="lbl">Person</span>
+        <div class="chips">
+          ${persons.map(
+            (p) => html`<button
+              class="chip person ${p.key === d.person ? "on" : ""}"
+              style=${styleMap({
+                borderColor: p.border,
+                background: p.key === d.person ? `rgba(${p.color},0.6)` : `rgba(${p.color},0.16)`,
+              })}
+              @click=${() => this._set("person", p.key)}
+            >
+              ${p.label || p.key}
+            </button>`
+          )}
+        </div>
+      </div>
+      <div class="fld">
+        <span class="lbl">Icon</span>
+        <div class="chips icons">
+          <button class="chip ${!d.iconKey ? "on" : ""}" @click=${() => this._set("iconKey", "")}>–<small>kein</small></button>
+          ${iconKeys.map(
+            (k) => html`<button class="chip icon ${k === d.iconKey ? "on" : ""}" @click=${() => this._set("iconKey", k)}>
+              ${icons[k]}<small>${k}</small>
+            </button>`
+          )}
+        </div>
+      </div>`;
+  }
+  _renderTaskDialog() {
+    const d = this._dialog;
+    const lists = this.config.todo_entities;
+    const list = lists.find((t) => t.entity === d.list) || lists[0];
+    const ruleLabel = d.trecur === "custom" ? ruleToText(d.trule) : (TASK_RECUR.find((r) => r.key === d.trecur) || {}).label;
+    return html`
+      <div class="overlay" @click=${this._onOverlayClick}>
+        <div class="modal wide" @click=${(e) => e.stopPropagation()}>
+          <div class="mhead">${d.mode === "create" ? "Neue Aufgabe" : "Aufgabe bearbeiten"}</div>
+          ${d.mode === "create" ? this._renderKindChips() : ""}
+          ${d.error ? html`<div class="err">${d.error}</div>` : ""}
+          ${lists.length > 1 && d.mode === "create"
+            ? html`<div class="fld">
+                <span class="lbl">Liste</span>
+                <div class="chips">
+                  ${lists.map(
+                    (t) => html`<button class="chip ${t.entity === list.entity ? "on" : ""}" @click=${() => this._set("list", t.entity)}>
+                      ${t.label}
+                    </button>`
+                  )}
+                </div>
+              </div>`
+            : ""}
+          ${list && list.prefix ? this._renderPersonIconChips(d) : ""}
+
+          <label class="fld"
+            >Aufgabe
+            <input type="text" .value=${d.title} placeholder="z.B. Katzenklo" @input=${(e) => this._set("title", e.target.value)} />
+          </label>
+
+          ${this._renderDatePick()}
+
+          <div class="fld">
+            <span class="lbl">Wiederholen ${d.trecur ? html`<b class="val">${ruleLabel}</b>` : ""}</span>
+            <div class="chips recur">
+              <button class="chip ${!d.trecur ? "on" : ""}" @click=${() => this._set("trecur", "")}>Nie</button>
+              ${TASK_RECUR.map(
+                (r) => html`<button class="chip ${r.key === d.trecur ? "on" : ""}" @click=${() => this._set("trecur", r.key)}>${r.label}</button>`
+              )}
+              ${d.trecur === "custom" ? html`<button class="chip on">${ruleToText(d.trule)}</button>` : ""}
+            </div>
+            ${d.trecur
+              ? html`<div class="note">Beim Abhaken wird die nächste Fälligkeit automatisch angelegt (bei überfälligen Aufgaben ab heute gerechnet).</div>`
+              : ""}
+          </div>
+
+          ${this._kbEnabled() ? this._renderKeyboard() : ""}
+
+          <div class="actions">
+            ${d.mode === "edit" ? html`<button class="del" @click=${this._delete} ?disabled=${d.saving}>Löschen</button>` : ""}
+            <span class="spacer"></span>
+            <button @click=${this._closeDialog} ?disabled=${d.saving}>Abbrechen</button>
+            <button class="primary" @click=${this._save} ?disabled=${d.saving}>${d.saving ? "…" : "Speichern"}</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
   _renderDialog() {
     const d = this._dialog;
+    if (d.kind === "task") return this._renderTaskDialog();
     const persons = this._persons();
     const icons = this._icons();
     const iconKeys = Object.keys(icons);
@@ -1302,6 +1864,7 @@ class FamilyWeekPlannerCard extends LitElement {
       <div class="overlay" @click=${this._onOverlayClick}>
         <div class="modal wide" @click=${(e) => e.stopPropagation()}>
           <div class="mhead">${d.mode === "create" ? "Neuer Termin" : "Termin bearbeiten"}</div>
+          ${d.mode === "create" && this.config.todo_entities.length ? this._renderKindChips() : ""}
           ${d.recurrence_id
             ? html`<div class="note">
                 Serientermin (${recurLabel(d.recurOrig, d.rrule) || "wiederkehrend"}) – beim Speichern oder Löschen wirst du
@@ -1578,6 +2141,44 @@ class FamilyWeekPlannerCard extends LitElement {
     .chips.recur .chip {
       min-height: 40px;
       font-size: 14px;
+    }
+
+    /* ---- tasks (to-do items in the grid) ---- */
+    .ev.task {
+      border-style: dashed;
+    }
+    .ev.task .cb {
+      display: inline-block;
+      margin: -2px 4px -2px -4px;
+      padding: 2px 5px;
+      font-size: 17px;
+      line-height: 1;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+    .ev.task .cb:hover {
+      background: rgba(255, 255, 255, 0.14);
+    }
+    .ev.task.done {
+      opacity: 0.55;
+    }
+    .ev.task.done .tt {
+      text-decoration: line-through;
+    }
+    .ev.task.overdue {
+      border-color: rgba(255, 138, 128, 0.85);
+    }
+    .ev.task .od {
+      color: #ff8a80;
+      font-weight: 700;
+      margin-right: 4px;
+    }
+    .chips.kind {
+      margin: -4px 0 12px;
+    }
+    .chips.kind .chip {
+      min-height: 40px;
+      padding: 0 16px;
     }
     /* today column highlight sits on top of the per-person background */
     thead th.today {

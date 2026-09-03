@@ -118,6 +118,39 @@ Moving a series to another weekday rewrites a single-weekday `BYDAY` to the new 
 > (see [psewar/Home-Assistant-CalDav-Upgrade](https://github.com/psewar/Home-Assistant-CalDav-Upgrade)).
 > With a backend that ignores these parameters the card would silently change the whole series.
 
+### Tasks (to-do lists in the grid)
+
+Point the card at one or more Home Assistant **to-do lists** and chores show up in the same
+week grid as events, each with a checkbox:
+
+```yaml
+todo_entities:
+  - entity: todo.familienaufgaben          # titles use the "Person|Icon: Title" convention
+  - entity: todo.arbeit                    # an external list (e.g. Microsoft To Do via MS365):
+    label: Arbeit                          #   titles carry no prefix -> fixed row + icon
+    person: Kay
+    icon: Arbeit
+    prefix: false
+    readonly: false                        # true = show + tick off only, no edit/move/delete
+todo_cleanup_days: 7                       # remove completed tasks older than N days (0 = keep)
+default_kind: event                        # what a tap on an empty cell creates first: event | task
+```
+
+- A task sits in the column of its **due date**. Open tasks that are **overdue** (or have no
+  due date) are pulled into **today's** column and marked `!`, so nothing gets lost.
+- **Tap the checkbox** to complete a task; tap the text to edit it (title, person, icon, due
+  date, repetition); drag it to another day/person to move its due date.
+- **Recurring tasks** carry a `↻ …` line in their description – human readable and editable in
+  any HA client: `↻ täglich`, `↻ alle 3 Tage`, `↻ wöchentlich`, `↻ alle 2 Wochen`,
+  `↻ monatlich`, `↻ jährlich`, `↻ Mo–Fr`, `↻ Mo, Do` (weekday lists), or an RFC 5545
+  `FREQ=…` rule. Completing such a task marks it done **and adds the next occurrence**
+  (overdue tasks continue from today, so a late tick doesn't create a backlog). Un-ticking
+  removes that follow-up again.
+- Completed tasks stay visible struck-through on their due day and are removed after
+  `todo_cleanup_days`.
+- Tasks added by voice ("Füge Katzenklo zu Familienaufgaben hinzu") or in the HA app have no
+  prefix and land in the fallback row – drag them to a person or add the prefix later.
+
 ### Icons maintained in Home Assistant
 
 Instead of editing the dashboard YAML, keep the `Word:Emoji` icon list in a helper and point the

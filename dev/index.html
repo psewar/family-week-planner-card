@@ -113,6 +113,29 @@
         timed(6, 10, 0, 10, 30, "David|Arzt: Zahnarzt"),
       ];
 
+      // To-do lists (HA `todo` domain): {uid, summary, status, due, description}.
+      // "Familienaufgaben" uses the Person|Icon: convention; "Arbeit" mimics an external list
+      // (e.g. Microsoft To Do) whose titles carry no prefix -> fixed person/icon in the card config.
+      const TODAY = new Date();
+      TODAY.setHours(0, 0, 0, 0);
+      const dayOff = (n) => ymd(addDays(TODAY, n));
+      const TODOS = {
+        "todo.familienaufgaben": [
+          { uid: "t1", summary: "Rest|Aufgabe: Katzenklo", status: "needs_action", due: dayOff(0), description: "↻ täglich" },
+          { uid: "t2", summary: "Ben|Aufgabe: Zimmer aufräumen", status: "needs_action", due: ymd(addDays(MON, 5)), description: "↻ wöchentlich" },
+          { uid: "t3", summary: "Anna|Müll: Müll rausbringen", status: "needs_action", due: dayOff(-2), description: "↻ Mo, Do\nBlaue Tonne" },
+          { uid: "t4", summary: "Familie: Blumen giessen", status: "needs_action", description: "" },
+          { uid: "t5", summary: "Carla|Aufgabe: Hausaufgaben", status: "completed", due: dayOff(-1), description: "↻ Mo–Fr" },
+          { uid: "t6", summary: "David: Altglas", status: "completed", due: dayOff(-20), description: "" },
+        ],
+        "todo.arbeit": [
+          { uid: "w1", summary: "Architektur prüfen", status: "needs_action", due: dayOff(1) },
+          { uid: "w2", summary: "Review Sprint-Board", status: "needs_action", due: dayOff(0), description: "↻ wöchentlich" },
+        ],
+      };
+      let tid = 500;
+      const findTodo = (entity, ref) => (TODOS[entity] || []).find((x) => x.uid === ref || x.summary === ref);
+
       const toDate = (o) => (o.dateTime ? new Date(o.dateTime) : new Date(o.date + "T00:00:00"));
       const clone = (o) => JSON.parse(JSON.stringify(o));
 
@@ -240,6 +263,8 @@
         language: "de",
         states: {
           "calendar.familie": { state: "on", last_updated: new Date().toISOString(), attributes: {} },
+          "todo.familienaufgaben": { state: "4", last_updated: new Date().toISOString(), attributes: { friendly_name: "Familienaufgaben" } },
+          "todo.arbeit": { state: "2", last_updated: new Date().toISOString(), attributes: { friendly_name: "Arbeit" } },
           // icon map maintained as an input_select helper ("Word:Emoji" options)
           "input_select.familienplaner_icons": {
             state: "Sport:🏋️",
@@ -254,7 +279,34 @@
           log(`GET ${method} → ${out.length} Termine`);
           return out;
         },
+        // HA service calls used by the card: todo.add_item / update_item / remove_item
+        async callService(domain, service, data, target) {
+          const entity = target && target.entity_id;
+          if (domain !== "todo" || !TODOS[entity]) throw new Error(`unknown service ${domain}.${service} / ${entity}`);
+          const list = TODOS[entity];
+          if (service === "add_item") {
+            list.push({ uid: `t${tid++}`, summary: data.item, status: "needs_action", due: data.due_date, description: data.description || "" });
+            log(`todo.add_item "${data.item}" due ${data.due_date}${data.description ? " (" + data.description.split("\n")[0] + ")" : ""}`);
+          } else if (service === "update_item") {
+            const it = findTodo(entity, data.item);
+            if (!it) throw new Error(`Unable to find to-do list item: ${data.item}`);
+            if (data.rename !== undefined) it.summary = data.rename;
+            if (data.status !== undefined) it.status = data.status;
+            if (data.due_date !== undefined) it.due = data.due_date;
+            if (data.description !== undefined) it.description = data.description;
+            log(`todo.update_item ${it.uid}: ${JSON.stringify({ ...data, item: undefined })}`);
+          } else if (service === "remove_item") {
+            const i = list.findIndex((x) => x.uid === data.item || x.summary === data.item);
+            if (i >= 0) list.splice(i, 1);
+            log(`todo.remove_item ${data.item}`);
+          } else throw new Error(`unsupported todo service ${service}`);
+          mockHass.states[entity] = { ...mockHass.states[entity], state: String(list.filter((x) => x.status !== "completed").length), last_updated: new Date().toISOString() };
+          return {};
+        },
         async callWS(msg) {
+          if (msg.type === "todo/item/list") {
+            return { items: clone(TODOS[msg.entity_id] || []) };
+          }
           if (msg.type === "calendar/event/create") {
             const ev = { ...fromWs(msg.event), uid: nextUid() };
             if (msg.event.rrule) ev.rrule = msg.event.rrule;
@@ -339,6 +391,10 @@
         entity: "calendar.familie",
         keyboard: true,
         icons_entity: "input_select.familienplaner_icons",
+        todo_entities: [
+          { entity: "todo.familienaufgaben", label: "Familie" },
+          { entity: "todo.arbeit", label: "Arbeit", person: "Anna", icon: "Arbeit", prefix: false },
+        ],
         persons: [
           { key: "Familie", color: "126,87,194", border: "#7e57c2", text: "#c9b3f0" },
           { key: "Anna", color: "30,136,229", border: "#1e88e5", text: "#8ecbff" },
