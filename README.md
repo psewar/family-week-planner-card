@@ -93,6 +93,31 @@ drop_minute_step: 5           # optional, minute step of the flyout (5 → :00 :
 While dragging, the upper/lower half of an hour row picks :00/:30. Rest on the hour for
 `drop_minutes_delay` and a minutes column flies out next to it — drop there for an exact time.
 
+### Recurring events
+
+The dialog has a **Wiederholen** row: *Nie · Täglich · Mo–Fr · Wöchentlich · Alle 2 Wochen ·
+Monatlich · Jährlich* (plain RFC 5545 rules: `FREQ=DAILY`, `FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR`,
+`FREQ=WEEKLY`, `FREQ=WEEKLY;INTERVAL=2`, `FREQ=MONTHLY`, `FREQ=YEARLY`). Occurrences of a series
+show a small ↻ marker. Rules written by other clients that don't match a preset are shown as
+*Eigene Regel* and left untouched.
+
+Whenever you **save, delete or drag** an occurrence of a series the card asks what the change
+applies to:
+
+- **Nur diesen Termin** – only this occurrence (an exception is written, the series stays).
+- **Diesen und alle zukünftigen** – the series is split here; earlier occurrences stay as they
+  were. Changing the rhythm always applies from this occurrence on.
+- **Ganze Serie** (delete only) – removes the series including past occurrences.
+
+An unchanged rhythm is never re-sent, so an `UNTIL`/`COUNT` maintained elsewhere survives edits.
+Moving a series to another weekday rewrites a single-weekday `BYDAY` to the new day.
+
+> The backend has to implement the Home Assistant calendar API for recurring events
+> (`recurrence_id` / `recurrence_range` on update and delete, `rrule` on create). Local Calendar
+> does; for CalDAV use a build of the CalDAV Upgrade integration with recurrence support
+> (see [psewar/Home-Assistant-CalDav-Upgrade](https://github.com/psewar/Home-Assistant-CalDav-Upgrade)).
+> With a backend that ignores these parameters the card would silently change the whole series.
+
 ### Icons maintained in Home Assistant
 
 Instead of editing the dashboard YAML, keep the `Word:Emoji` icon list in a helper and point the
