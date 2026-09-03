@@ -49,9 +49,11 @@
     <div class="bar">
       <strong>family-week-planner-card</strong>
       <button id="dump">Store in Konsole</button>
+      <button id="editor">Editor ein/aus</button>
       <span class="log" id="log">bereit</span>
     </div>
     <div class="stage" id="stage"></div>
+    <div class="stage" id="editorStage" style="max-width: 760px"></div>
 
     <script type="module">
       await import("/dist/family-week-planner-card.js");
@@ -263,6 +265,12 @@
         language: "de",
         states: {
           "calendar.familie": { state: "on", last_updated: new Date().toISOString(), attributes: {} },
+          // optional rows helper (used when the page is opened with ?rows): no "Rest" -> auto-appended
+          "input_select.familienplaner_zeilen": {
+            state: "Familie:#7e57c2",
+            last_updated: new Date().toISOString(),
+            attributes: { friendly_name: "Familienplaner Zeilen", options: ["Familie:#7e57c2", "Anna:#1e88e5", "Ben", "Carla:0,137,123", "Essen:#6d4c41"] },
+          },
           "todo.familienaufgaben": { state: "4", last_updated: new Date().toISOString(), attributes: { friendly_name: "Familienaufgaben" } },
           "todo.arbeit": { state: "2", last_updated: new Date().toISOString(), attributes: { friendly_name: "Arbeit" } },
           // icon map maintained as an input_select helper ("Word:Emoji" options)
@@ -386,9 +394,11 @@
       }
 
       const card = document.createElement("family-week-planner-card");
-      card.setConfig({
+      const useRowsHelper = new URLSearchParams(location.search).has("rows");
+      const CARD_CONFIG = {
         title: "Familienwoche",
         entity: "calendar.familie",
+        ...(useRowsHelper ? { persons_entity: "input_select.familienplaner_zeilen" } : {}),
         keyboard: true,
         icons_entity: "input_select.familienplaner_icons",
         todo_entities: [
@@ -404,10 +414,34 @@
           { key: "Essen", color: "109,76,65", border: "#6d4c41", text: "#c8b0a4", alpha: 0.16 },
           { key: "Rest", color: "84,110,122", border: "#546e7a", text: "#b0bec5", alpha: 0.14 },
         ],
-      });
+      };
+      card.setConfig(CARD_CONFIG);
       card.hass = mockHass;
       document.getElementById("stage").appendChild(card);
       window.__STORE = () => STORE;
+
+      // Visual config editor (what HA shows under Dashboard -> Bearbeiten -> Karte). Changes are
+      // applied to the live card above so the effect is visible immediately.
+      let editor = null;
+      window.__EDITOR = () => editor;
+      document.getElementById("editor").onclick = () => {
+        const host = document.getElementById("editorStage");
+        if (editor) {
+          host.innerHTML = "";
+          editor = null;
+          return;
+        }
+        editor = document.createElement("family-week-planner-card-editor");
+        editor.hass = mockHass;
+        editor.setConfig(CARD_CONFIG);
+        editor.addEventListener("config-changed", (e) => {
+          window.__LAST_CONFIG = e.detail.config;
+          card.setConfig(e.detail.config);
+          card.hass = mockHass;
+          log(`config-changed: ${Object.keys(e.detail.config).join(", ")}`);
+        });
+        host.appendChild(editor);
+      };
 
       document.getElementById("dump").onclick = () => {
         console.log("STORE", STORE);
