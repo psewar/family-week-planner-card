@@ -97,20 +97,144 @@
 
       // In-memory calendar the mock reads/writes so CRUD is visible on reload.
       // Fictional demo names — real household names live only in the dashboard config.
+      // Entries with `rrule` are series masters (like one CalDAV resource): the engine below
+      // expands them and keeps per-instance overrides / EXDATEs / UNTIL like the ical backend.
       let STORE = [
         timed(0, 7, 0, 8, 0, "Anna|Sport: Joggen"),
         timed(0, 20, 0, 22, 0, "Anna|Tanzen: Tanzkurs"),
         timed(0, 8, 0, 12, 0, "Ben|Schule: Lernen"),
         allday(1, "Familie|Ausflug: Zoo"),
         timed(2, 15, 30, 16, 30, "Carla|Schule: Ballett"),
-        timed(2, 18, 15, 19, 30, "Ben|Sport: Fussball"),
-        timed(3, 20, 0, 22, 0, "Anna|Chor: Chorprobe"),
-        timed(4, 12, 0, 13, 0, "Essen|Mittag: Mittagessen"),
+        { ...timed(1 - 21, 18, 15, 19, 30, "Ben|Sport: Fussball"), rrule: "FREQ=WEEKLY;BYDAY=TU" },
+        { ...timed(0 - 14, 12, 0, 13, 0, "Essen|Mittag: Mittagessen"), rrule: "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR" },
+        { ...timed(3, 20, 0, 22, 0, "Anna|Chor: Chorprobe"), rrule: "FREQ=WEEKLY;INTERVAL=2" },
+        { ...allday(4 - 7, "Rest|Ausflug: Müll rausstellen"), rrule: "FREQ=WEEKLY" },
         allday(5, "Ausflug See"),
         timed(6, 10, 0, 10, 30, "David|Arzt: Zahnarzt"),
       ];
 
       const toDate = (o) => (o.dateTime ? new Date(o.dateTime) : new Date(o.date + "T00:00:00"));
+      const clone = (o) => JSON.parse(JSON.stringify(o));
+
+      /* ---------- mini recurrence engine (mirrors the ical-based backend) ---------- */
+      const BYD = ["MO", "TU", "WE", "TH", "FR", "SA", "SU"];
+      const parseRR = (s) =>
+        Object.fromEntries(
+          String(s || "")
+            .split(";")
+            .filter(Boolean)
+            .map((p) => {
+              const i = p.indexOf("=");
+              return [p.slice(0, i).toUpperCase(), p.slice(i + 1).toUpperCase()];
+            })
+        );
+      const serRR = (o) =>
+        Object.entries(o)
+          .filter(([, v]) => v)
+          .map(([k, v]) => `${k}=${v}`)
+          .join(";");
+      // recurrence_id like ical: YYYYMMDDTHHMMSS (floating local) or YYYYMMDD for all-day
+      const fmtRid = (d, isAllday) =>
+        `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}` +
+        (isAllday ? "" : `T${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`);
+      const parseRid = (rid) =>
+        new Date(+rid.slice(0, 4), +rid.slice(4, 6) - 1, +rid.slice(6, 8), +(rid.slice(9, 11) || 0), +(rid.slice(11, 13) || 0), +(rid.slice(13, 15) || 0));
+      const parseUntil = (u) =>
+        u.endsWith("Z")
+          ? new Date(Date.UTC(+u.slice(0, 4), +u.slice(4, 6) - 1, +u.slice(6, 8), +(u.slice(9, 11) || 0), +(u.slice(11, 13) || 0), +(u.slice(13, 15) || 0)))
+          : parseRid(u);
+      const fmtUntil = (d) =>
+        `${d.getUTCFullYear()}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}T${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}${pad(d.getUTCSeconds())}Z`;
+      const withUntil = (rrule, untilDate) => {
+        const p = parseRR(rrule);
+        delete p.COUNT;
+        p.UNTIL = fmtUntil(untilDate);
+        return serRR(p);
+      };
+
+      function occurrences(master, rangeStart, rangeEnd) {
+        const s0 = toDate(master.start);
+        const e0 = master.end ? toDate(master.end) : addDays(s0, 1);
+        const dur = e0 - s0;
+        const rr = parseRR(master.rrule);
+        const interval = Math.max(1, +(rr.INTERVAL || 1));
+        const until = rr.UNTIL ? parseUntil(rr.UNTIL) : null;
+        const count = rr.COUNT ? +rr.COUNT : Infinity;
+        const out = [];
+        let n = 0;
+        const push = (d) => {
+          if (until && d > until) return false;
+          if (n >= count) return false;
+          n++;
+          const e = new Date(d.getTime() + dur);
+          if (d < rangeEnd && e > rangeStart) out.push({ start: d, end: e });
+          return true;
+        };
+        if (rr.FREQ === "WEEKLY" && rr.BYDAY) {
+          const days = rr.BYDAY.split(",")
+            .map((x) => BYD.indexOf(x))
+            .filter((i) => i >= 0)
+            .sort();
+          const weekStart = mondayOf(s0);
+          for (let w = 0; w < 500; w++) {
+            const base = addDays(weekStart, w * 7 * interval);
+            if (base > rangeEnd) break;
+            for (const di of days) {
+              const d = addDays(base, di);
+              d.setHours(s0.getHours(), s0.getMinutes(), s0.getSeconds(), 0);
+              if (d < s0) continue;
+              if (push(d) === false) return out;
+            }
+          }
+          return out;
+        }
+        for (let i = 0; i < 2000; i++) {
+          const d = new Date(s0);
+          if (rr.FREQ === "DAILY") d.setDate(s0.getDate() + i * interval);
+          else if (rr.FREQ === "WEEKLY") d.setDate(s0.getDate() + 7 * i * interval);
+          else if (rr.FREQ === "MONTHLY") d.setMonth(s0.getMonth() + i * interval);
+          else if (rr.FREQ === "YEARLY") d.setFullYear(s0.getFullYear() + i * interval);
+          else return out;
+          if (d >= rangeEnd) break;
+          if (push(d) === false) break;
+        }
+        return out;
+      }
+
+      function expandAll(rangeStart, rangeEnd) {
+        const out = [];
+        const overlaps = (ev) => {
+          const s = toDate(ev.start);
+          const e = ev.end ? toDate(ev.end) : addDays(s, 1);
+          return s < rangeEnd && e > rangeStart;
+        };
+        for (const m of STORE) {
+          if (!m.rrule) {
+            if (overlaps(m)) out.push(clone(m));
+            continue;
+          }
+          const isAllday = !!m.start.date;
+          // widen the window so overrides moved into/out of the week are handled
+          for (const occ of occurrences(m, addDays(rangeStart, -60), addDays(rangeEnd, 60))) {
+            const rid = fmtRid(occ.start, isAllday);
+            if ((m.exdates || []).includes(rid)) continue;
+            const ov = (m.overrides || {})[rid];
+            const ev = ov
+              ? { ...clone(ov), uid: m.uid, recurrence_id: rid, rrule: m.rrule }
+              : {
+                  uid: m.uid,
+                  summary: m.summary,
+                  description: m.description,
+                  rrule: m.rrule,
+                  recurrence_id: rid,
+                  start: isAllday ? { date: ymd(occ.start) } : { dateTime: occ.start.toISOString() },
+                  end: isAllday ? { date: ymd(occ.end) } : { dateTime: occ.end.toISOString() },
+                };
+            if (overlaps(ev)) out.push(ev);
+          }
+        }
+        return out;
+      }
 
       const mockHass = {
         language: "de",
@@ -126,31 +250,67 @@
         localize: (k) => k,
         async callApi(method, path) {
           const q = new URLSearchParams(path.split("?")[1] || "");
-          const start = new Date(q.get("start"));
-          const end = new Date(q.get("end"));
-          const out = STORE.filter((e) => {
-            const s = toDate(e.start);
-            const en = e.end ? toDate(e.end) : addDays(s, 1);
-            return s < end && en > start;
-          }).map((e) => JSON.parse(JSON.stringify(e)));
+          const out = expandAll(new Date(q.get("start")), new Date(q.get("end")));
           log(`GET ${method} → ${out.length} Termine`);
           return out;
         },
         async callWS(msg) {
           if (msg.type === "calendar/event/create") {
-            const ev = fromWs(msg.event);
-            ev.uid = nextUid();
+            const ev = { ...fromWs(msg.event), uid: nextUid() };
+            if (msg.event.rrule) ev.rrule = msg.event.rrule;
             STORE.push(ev);
-            log(`create: "${msg.event.summary}"`);
+            log(`create: "${msg.event.summary}"${ev.rrule ? " (" + ev.rrule + ")" : ""}`);
             return {};
           }
           if (msg.type === "calendar/event/update") {
-            const i = STORE.findIndex((e) => e.uid === msg.uid);
-            if (i >= 0) STORE[i] = { ...fromWs(msg.event), uid: msg.uid };
+            const m = STORE.find((e) => e.uid === msg.uid);
+            if (!m) throw new Error(`No event found with UID ${msg.uid}`);
+            const ev = fromWs(msg.event);
+            if (msg.recurrence_id && m.rrule) {
+              if (msg.recurrence_range === "THISANDFUTURE") {
+                const splitAt = parseRid(msg.recurrence_id);
+                const firstStart = toDate(m.start);
+                if (splitAt <= firstStart) {
+                  // editing from the first instance = editing the whole series
+                  Object.assign(m, ev, { rrule: msg.event.rrule || m.rrule });
+                  log(`update series ${msg.uid} (from first instance)`);
+                  return {};
+                }
+                const newRule = msg.event.rrule || m.rrule;
+                m.rrule = withUntil(m.rrule, new Date(splitAt.getTime() - 86400000));
+                for (const rid of Object.keys(m.overrides || {})) if (parseRid(rid) >= splitAt) delete m.overrides[rid];
+                STORE.push({ ...ev, uid: nextUid(), rrule: newRule });
+                log(`split ${msg.uid} at ${msg.recurrence_id} → new series`);
+              } else {
+                if (msg.event.rrule) throw new Error("Can't update single instance with rrule");
+                m.overrides = m.overrides || {};
+                m.overrides[msg.recurrence_id] = ev;
+                log(`override ${msg.uid}@${msg.recurrence_id}: "${msg.event.summary}"`);
+              }
+              return {};
+            }
+            Object.assign(m, ev, msg.event.rrule !== undefined ? { rrule: msg.event.rrule } : {});
             log(`update ${msg.uid}: "${msg.event.summary}"`);
             return {};
           }
           if (msg.type === "calendar/event/delete") {
+            const m = STORE.find((e) => e.uid === msg.uid);
+            if (m && msg.recurrence_id && m.rrule) {
+              const splitAt = parseRid(msg.recurrence_id);
+              if (msg.recurrence_range === "THISANDFUTURE") {
+                if (splitAt <= toDate(m.start)) STORE = STORE.filter((e) => e !== m);
+                else {
+                  m.rrule = withUntil(m.rrule, new Date(splitAt.getTime() - 86400000));
+                  for (const rid of Object.keys(m.overrides || {})) if (parseRid(rid) >= splitAt) delete m.overrides[rid];
+                }
+                log(`delete ${msg.uid} from ${msg.recurrence_id} on`);
+              } else {
+                (m.exdates = m.exdates || []).push(msg.recurrence_id);
+                if (m.overrides) delete m.overrides[msg.recurrence_id];
+                log(`exdate ${msg.uid}@${msg.recurrence_id}`);
+              }
+              return {};
+            }
             STORE = STORE.filter((e) => e.uid !== msg.uid);
             log(`delete ${msg.uid}`);
             return {};
@@ -191,11 +351,11 @@
       });
       card.hass = mockHass;
       document.getElementById("stage").appendChild(card);
+      window.__STORE = () => STORE;
 
-      // Re-push hass periodically so external-like changes would refresh (also proves no fetch storm).
       document.getElementById("dump").onclick = () => {
         console.log("STORE", STORE);
-        log(`${STORE.length} Termine im Store (siehe Konsole)`);
+        log(`${STORE.length} Einträge im Store (siehe Konsole)`);
       };
     </script>
   </body>

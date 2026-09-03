@@ -19,7 +19,7 @@ import { LitElement, html, css } from "lit";
 import { styleMap } from "lit/directives/style-map.js";
 import { classMap } from "lit/directives/class-map.js";
 
-const CARD_VERSION = "0.6.0";
+const CARD_VERSION = "0.7.0";
 
 const WEEKDAYS = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"];
 
@@ -73,6 +73,67 @@ function dayIndex(date, weekStart) {
   return Math.round((a - b) / 86400000);
 }
 
+/* ---------- recurrence presets (RFC 5545 RRULE) ---------- */
+const RECUR_PRESETS = [
+  { key: "daily", label: "Täglich", rrule: "FREQ=DAILY" },
+  { key: "weekdays", label: "Mo–Fr", rrule: "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR" },
+  { key: "weekly", label: "Wöchentlich", rrule: "FREQ=WEEKLY" },
+  { key: "biweekly", label: "Alle 2 Wochen", rrule: "FREQ=WEEKLY;INTERVAL=2" },
+  { key: "monthly", label: "Monatlich", rrule: "FREQ=MONTHLY" },
+  { key: "yearly", label: "Jährlich", rrule: "FREQ=YEARLY" },
+];
+const BYDAY = ["MO", "TU", "WE", "TH", "FR", "SA", "SU"];
+function parseRRule(rrule) {
+  const parts = {};
+  for (const p of String(rrule || "").split(";")) {
+    const i = p.indexOf("=");
+    if (i > 0) parts[p.slice(0, i).trim().toUpperCase()] = p.slice(i + 1).trim().toUpperCase();
+  }
+  return parts;
+}
+function serializeRRule(parts) {
+  return Object.entries(parts)
+    .filter(([, v]) => v !== undefined && v !== "")
+    .map(([k, v]) => `${k}=${v}`)
+    .join(";");
+}
+// Map an RRULE to one of our presets. Normalizes what other clients write (INTERVAL=1, WKST,
+// a BYDAY equal to the start weekday) and ignores UNTIL/COUNT. "" = not recurring, "custom" =
+// a rule we don't offer as a chip (shown read-only, still editable in scope).
+function recurKeyFor(rrule, startDate) {
+  if (!rrule) return "";
+  const { UNTIL: _u, COUNT: _c, WKST: _w, ...rest } = parseRRule(rrule);
+  if (rest.INTERVAL === "1") delete rest.INTERVAL;
+  if (rest.FREQ === "WEEKLY" && rest.BYDAY && startDate && rest.BYDAY === BYDAY[(startDate.getDay() + 6) % 7]) delete rest.BYDAY;
+  const norm = serializeRRule(rest);
+  const hit = RECUR_PRESETS.find((r) => serializeRRule(parseRRule(r.rrule)) === norm);
+  return hit ? hit.key : "custom";
+}
+function rruleFor(key) {
+  const hit = RECUR_PRESETS.find((r) => r.key === key);
+  return hit ? hit.rrule : "";
+}
+// A series moved to another weekday: a single-weekday BYDAY has to follow the new start,
+// otherwise DTSTART would fall outside its own rule. Multi-day rules (Mo–Fr) are kept.
+function rruleForNewStart(rrule, newStart) {
+  if (!rrule) return rrule;
+  const p = parseRRule(rrule);
+  if (p.FREQ === "WEEKLY" && p.BYDAY && !p.BYDAY.includes(",")) {
+    const wd = BYDAY[(newStart.getDay() + 6) % 7];
+    if (p.BYDAY !== wd) {
+      p.BYDAY = wd;
+      return serializeRRule(p);
+    }
+  }
+  return rrule;
+}
+function recurLabel(key, rrule) {
+  if (!key) return "";
+  if (key === "custom") return `eigene Regel (${rrule})`;
+  const hit = RECUR_PRESETS.find((r) => r.key === key);
+  return hit ? hit.label : key;
+}
+
 class FamilyWeekPlannerCard extends LitElement {
   static properties = {
     _weekStart: { state: true },
@@ -83,6 +144,7 @@ class FamilyWeekPlannerCard extends LitElement {
     _drag: { state: true },
     _toast: { state: true },
     _rowH: { state: true },
+    _scope: { state: true },
   };
 
   constructor() {
@@ -100,6 +162,7 @@ class FamilyWeekPlannerCard extends LitElement {
     this._pressTimer = null;
     this._suppressClickUntil = 0;
     this._toast = null;
+    this._scope = null; // pending "this / this and future / all" question for a series
     this._rowH = 210;
     this._onResize = () => {
       clearTimeout(this._resizeT);
@@ -110,7 +173,9 @@ class FamilyWeekPlannerCard extends LitElement {
   connectedCallback() {
     super.connectedCallback();
     this._onKey = (e) => {
-      if (e.key === "Escape" && this._drag) this._evPointerCancel();
+      if (e.key !== "Escape") return;
+      if (this._scope) this._scope = null;
+      else if (this._drag) this._evPointerCancel();
     };
     window.addEventListener("keydown", this._onKey);
     window.addEventListener("resize", this._onResize);
@@ -329,6 +394,7 @@ class FamilyWeekPlannerCard extends LitElement {
         time: allday ? "" : hm(dt),
         title,
         allday,
+        recurring: !!(e.recurrence_id || e.rrule),
         raw: e,
       });
     }
@@ -363,6 +429,9 @@ class FamilyWeekPlannerCard extends LitElement {
       end: this.config.default_end,
       uid: null,
       recurrence_id: null,
+      rrule: "",
+      recur: "",
+      recurOrig: "",
       pick: null,
       saving: false,
       error: "",
@@ -387,7 +456,9 @@ class FamilyWeekPlannerCard extends LitElement {
       end: allday ? this.config.default_end : hm(e),
       uid: raw.uid,
       recurrence_id: raw.recurrence_id || null,
-      recurring: !!raw.recurrence_id || !!raw.rrule,
+      rrule: raw.rrule || "",
+      recur: recurKeyFor(raw.rrule, s),
+      recurOrig: recurKeyFor(raw.rrule, s),
       pick: null,
       saving: false,
       error: "",
@@ -418,7 +489,11 @@ class FamilyWeekPlannerCard extends LitElement {
       dtstart = `${d.date} ${d.start}:00`;
       dtend = `${d.date} ${d.end}:00`;
     }
-    return { event: { summary, dtstart, dtend } };
+    const event = { summary, dtstart, dtend };
+    // Recurrence: only send a rule when the user changed it. An unchanged series keeps its
+    // stored RRULE untouched (incl. UNTIL/COUNT written by other clients).
+    if (d.recur !== d.recurOrig && d.recur !== "custom") event.rrule = rruleFor(d.recur);
+    return { event };
   }
 
   async _save() {
@@ -428,21 +503,43 @@ class FamilyWeekPlannerCard extends LitElement {
       return;
     }
     const d = this._dialog;
-    this._dialog = { ...this._dialog, saving: true, error: "" };
+    if (d.mode === "edit" && d.recurrence_id) {
+      // an occurrence of a series: ask what the change applies to
+      const recurChanged = "rrule" in built.event;
+      this._askScope({
+        title: "Serientermin ändern",
+        text: recurChanged
+          ? "Der Rhythmus wurde geändert – das gilt für diesen und alle zukünftigen Termine."
+          : "Wofür soll die Änderung gelten?",
+        options: [
+          ...(recurChanged ? [] : [{ label: "Nur diesen Termin", range: "" }]),
+          { label: "Diesen und alle zukünftigen", sub: "vergangene bleiben unverändert", range: "THISANDFUTURE" },
+        ],
+        onPick: (range) => this._commitSave(built.event, range),
+      });
+      return;
+    }
+    await this._commitSave(built.event, null);
+  }
+
+  async _commitSave(event, range) {
+    const d = this._dialog;
+    if (!d) return;
+    this._dialog = { ...d, saving: true, error: "" };
     try {
       if (d.mode === "create") {
         try {
           await this._hass.callWS({
             type: "calendar/event/create",
             entity_id: this.config.entity,
-            event: built.event,
+            event,
           });
         } catch (e) {
           // Some CalDAV backends (e.g. the n0tcaldav fork) write the event but
           // then throw a serialization error on the response. Don't fail blindly:
           // read the calendar back and treat it as success only if the event is
           // actually there. A genuine failure still surfaces the error.
-          const ok = await this._verifyCreated(built.event);
+          const ok = await this._verifyCreated(event);
           if (!ok) throw e;
         }
       } else {
@@ -450,11 +547,11 @@ class FamilyWeekPlannerCard extends LitElement {
           type: "calendar/event/update",
           entity_id: this.config.entity,
           uid: d.uid,
-          event: built.event,
+          event,
         };
-        if (d.recurrence_id) {
+        if (d.recurrence_id && range !== null) {
           msg.recurrence_id = d.recurrence_id;
-          msg.recurrence_range = ""; // this occurrence only
+          msg.recurrence_range = range; // "" = this occurrence only, "THISANDFUTURE" = split the series here
         }
         await this._hass.callWS(msg);
       }
@@ -463,6 +560,32 @@ class FamilyWeekPlannerCard extends LitElement {
     } catch (e) {
       this._dialog = { ...this._dialog, saving: false, error: this._errText(e) };
     }
+  }
+
+  _askScope(spec) {
+    this._scope = spec;
+  }
+  _renderScope() {
+    const s = this._scope;
+    if (!s) return "";
+    const pick = (o) => {
+      this._scope = null;
+      s.onPick(o.range);
+    };
+    return html`<div class="overlay scope" @click=${() => (this._scope = null)}>
+      <div class="modal scopebox" @click=${(e) => e.stopPropagation()}>
+        <div class="mhead">${s.title}</div>
+        ${s.text ? html`<div class="note">${s.text}</div>` : ""}
+        <div class="scopeopts">
+          ${s.options.map(
+            (o) => html`<button class="sopt ${o.cls || ""}" @click=${() => pick(o)}>
+              ${o.label}${o.sub ? html`<small>${o.sub}</small>` : ""}
+            </button>`
+          )}
+          <button class="sopt cancel" @click=${() => (this._scope = null)}>Abbrechen</button>
+        </div>
+      </div>
+    </div>`;
   }
 
   async _verifyCreated(event) {
@@ -486,12 +609,31 @@ class FamilyWeekPlannerCard extends LitElement {
       this._set("error", "Dieser Termin hat keine ID und kann nicht gelöscht werden.");
       return;
     }
-    this._dialog = { ...this._dialog, saving: true, error: "" };
+    if (d.recurrence_id) {
+      this._askScope({
+        title: "Serientermin löschen",
+        text: "Was soll gelöscht werden?",
+        options: [
+          { label: "Nur diesen Termin", range: "" },
+          { label: "Diesen und alle zukünftigen", sub: "vergangene bleiben", range: "THISANDFUTURE" },
+          { label: "Ganze Serie", sub: "auch vergangene Termine", range: "ALL", cls: "del" },
+        ],
+        onPick: (range) => this._commitDelete(range),
+      });
+      return;
+    }
+    await this._commitDelete(null);
+  }
+
+  async _commitDelete(range) {
+    const d = this._dialog;
+    if (!d) return;
+    this._dialog = { ...d, saving: true, error: "" };
     try {
       const msg = { type: "calendar/event/delete", entity_id: this.config.entity, uid: d.uid };
-      if (d.recurrence_id) {
+      if (d.recurrence_id && range !== null && range !== "ALL") {
         msg.recurrence_id = d.recurrence_id;
-        msg.recurrence_range = "";
+        msg.recurrence_range = range;
       }
       await this._hass.callWS(msg);
       this._closeDialog();
@@ -720,9 +862,32 @@ class FamilyWeekPlannerCard extends LitElement {
       event: { summary, dtstart, dtend },
     };
     if (raw.recurrence_id) {
+      // an occurrence of a series: ask whether to move just this one or the series from here on
       msg.recurrence_id = raw.recurrence_id;
-      msg.recurrence_range = "";
+      const alldayTarget = dtstart.length === 10;
+      const when = `${WEEKDAYS[d.target.day]} ${fmtDM(day)}${alldayTarget ? ", ganztags" : " " + dtstart.slice(11, 16)}`;
+      this._askScope({
+        title: "Serientermin verschieben",
+        text: `„${it.title}" → ${when}`,
+        options: [
+          { label: "Nur diesen Termin", range: "" },
+          { label: "Diesen und alle zukünftigen", sub: "vergangene bleiben", range: "THISANDFUTURE" },
+        ],
+        onPick: (range) => {
+          msg.recurrence_range = range;
+          if (range === "THISANDFUTURE" && raw.rrule) {
+            const rr = rruleForNewStart(raw.rrule, day);
+            if (rr !== raw.rrule) msg.event.rrule = rr;
+          }
+          this._commitMove(msg);
+        },
+      });
+      return;
     }
+    await this._commitMove(msg);
+  }
+
+  async _commitMove(msg) {
     this._toast = { text: "Verschiebe …" };
     try {
       await this._hass.callWS(msg);
@@ -884,6 +1049,7 @@ class FamilyWeekPlannerCard extends LitElement {
                             this._openEdit(it);
                           }}
                         >
+                          ${it.recurring ? html`<span class="rec" title="Serientermin">↻</span>` : ""}
                           ${it.emoji ? html`${it.emoji} ` : ""}${it.time ? html`<b>${it.time}</b> ` : ""}${it.title}
                         </div>`
                       )}
@@ -895,6 +1061,7 @@ class FamilyWeekPlannerCard extends LitElement {
           </table>
         </div>
         ${this._dialog ? this._renderDialog() : ""}
+        ${this._renderScope()}
         ${this._renderDropPanel()}
         ${this._renderGhost()}
         ${this._toast ? html`<div class="toast ${this._toast.error ? "err" : ""}">${this._toast.text}</div>` : ""}
@@ -1135,7 +1302,12 @@ class FamilyWeekPlannerCard extends LitElement {
       <div class="overlay" @click=${this._onOverlayClick}>
         <div class="modal wide" @click=${(e) => e.stopPropagation()}>
           <div class="mhead">${d.mode === "create" ? "Neuer Termin" : "Termin bearbeiten"}</div>
-          ${d.recurring ? html`<div class="note">Serientermin – Änderungen betreffen diesen Termin.</div>` : ""}
+          ${d.recurrence_id
+            ? html`<div class="note">
+                Serientermin (${recurLabel(d.recurOrig, d.rrule) || "wiederkehrend"}) – beim Speichern oder Löschen wirst du
+                gefragt, ob nur dieser oder auch alle zukünftigen Termine betroffen sind.
+              </div>`
+            : ""}
           ${d.error ? html`<div class="err">${d.error}</div>` : ""}
 
           <div class="fld">
@@ -1201,6 +1373,21 @@ class FamilyWeekPlannerCard extends LitElement {
                     </button>`}
             </div>
             ${!d.allday && d.pick ? this._renderTimePick(d.pick) : ""}
+          </div>
+
+          <div class="fld">
+            <span class="lbl">Wiederholen ${d.recur ? html`<b class="val">${recurLabel(d.recur, d.rrule)}</b>` : ""}</span>
+            <div class="chips recur">
+              ${d.recurrence_id
+                ? ""
+                : html`<button class="chip ${!d.recur ? "on" : ""}" @click=${() => this._set("recur", "")}>Nie</button>`}
+              ${RECUR_PRESETS.map(
+                (r) => html`<button class="chip ${r.key === d.recur ? "on" : ""}" @click=${() => this._set("recur", r.key)}>
+                  ${r.label}
+                </button>`
+              )}
+              ${d.recur === "custom" ? html`<button class="chip on" title=${d.rrule}>Eigene Regel</button>` : ""}
+            </div>
           </div>
 
           ${this._kbEnabled() ? this._renderKeyboard() : ""}
@@ -1337,6 +1524,60 @@ class FamilyWeekPlannerCard extends LitElement {
     .ev:hover {
       background: rgba(0, 0, 0, 0.42);
       border-color: rgba(255, 255, 255, 0.34);
+    }
+    .ev .rec {
+      float: right;
+      margin-left: 4px;
+      opacity: 0.6;
+      font-size: 12px;
+    }
+
+    /* ---- scope prompt (series: this / this and future / all) ---- */
+    .overlay.scope {
+      z-index: 9999;
+    }
+    .modal.scopebox {
+      max-width: 440px;
+    }
+    .scopeopts {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-top: 8px;
+    }
+    .sopt {
+      min-height: 54px;
+      font-size: 16px;
+      border-radius: 12px;
+      border: 1px solid rgba(255, 255, 255, 0.22);
+      background: rgba(255, 255, 255, 0.1);
+      color: inherit;
+      cursor: pointer;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      line-height: 1.2;
+    }
+    .sopt small {
+      font-size: 12px;
+      opacity: 0.7;
+    }
+    .sopt:hover {
+      background: rgba(255, 255, 255, 0.18);
+    }
+    .sopt.del {
+      color: #ff9a9a;
+      border-color: rgba(211, 47, 47, 0.5);
+      background: rgba(211, 47, 47, 0.12);
+    }
+    .sopt.cancel {
+      background: transparent;
+      opacity: 0.8;
+    }
+    .chips.recur .chip {
+      min-height: 40px;
+      font-size: 14px;
     }
     /* today column highlight sits on top of the per-person background */
     thead th.today {
