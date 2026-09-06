@@ -19,7 +19,7 @@ import { LitElement, html, css } from "lit";
 import { styleMap } from "lit/directives/style-map.js";
 import { classMap } from "lit/directives/class-map.js";
 
-const CARD_VERSION = "0.9.0";
+const CARD_VERSION = "0.9.1";
 
 const WEEKDAYS = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"];
 
@@ -283,19 +283,36 @@ function nextDue(from, rule) {
   }
   if (rule.freq === "DAILY") return addDays(from, n);
   if (rule.freq === "WEEKLY") return addDays(from, 7 * n);
-  const d = new Date(from);
-  if (rule.freq === "MONTHLY") {
-    const day = d.getDate();
-    d.setDate(1);
-    d.setMonth(d.getMonth() + n);
-    d.setDate(Math.min(day, new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate()));
-    return d;
-  }
-  if (rule.freq === "YEARLY") {
-    d.setFullYear(d.getFullYear() + n);
-    return d;
-  }
+  if (rule.freq === "MONTHLY") return addMonthsClamped(from, n);
+  if (rule.freq === "YEARLY") return addMonthsClamped(from, 12 * n);
   return addDays(from, 1);
+}
+// Add `months` months keeping the day of month (clamped to the target month's length).
+function addMonthsClamped(from, months) {
+  const d = new Date(from);
+  const day = d.getDate();
+  d.setDate(1);
+  d.setMonth(d.getMonth() + months);
+  d.setDate(Math.min(day, new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate()));
+  return d;
+}
+// Follow-up date after completing a recurring task: the first occurrence of the rhythm strictly
+// after `today`, counted from the task's own due date. A weekly chore due on Thursday that is
+// ticked off on Saturday therefore comes back next Thursday (not Saturday + 7 days), monthly and
+// yearly chores keep their day of month. Plain daily rhythms ("alle 3 Tage") restart from today
+// instead, so a late completion doesn't produce a backlog. `due` may be null (undated task).
+function nextDueAfter(due, today, rule) {
+  if (!due || rule.freq === "DAILY") return nextDue(!due || due < today ? today : due, rule);
+  const n = Math.max(1, rule.interval || 1);
+  if (rule.freq === "MONTHLY" || rule.freq === "YEARLY") {
+    const step = rule.freq === "MONTHLY" ? n : 12 * n;
+    let d = addMonthsClamped(due, step);
+    for (let k = 2; k < 2400 && d <= today; k++) d = addMonthsClamped(due, step * k);
+    return d;
+  }
+  let d = nextDue(due, rule);
+  for (let k = 0; k < 6000 && d <= today; k++) d = nextDue(d, rule);
+  return d;
 }
 // Split a task description into the recurrence rule and the remaining free text.
 function splitDescription(desc) {
@@ -647,11 +664,10 @@ class FamilyWeekPlannerCard extends LitElement {
       if (!it.done) {
         await this._svc(list, "update_item", { item: raw.uid, status: "completed" });
         if (it.rule) {
-          // recurring: create the next occurrence. Overdue tasks continue from today, so a late
-          // completion doesn't produce a backlog.
-          const due = raw.due ? parseDate(String(raw.due).slice(0, 10)) : todayStart();
-          const base = due < todayStart() ? todayStart() : due;
-          const data = { item: raw.summary, due_date: ymd(nextDue(base, it.rule)) };
+          // recurring: create the next occurrence (first date of the rhythm after today, counted
+          // from the task's due date – see nextDueAfter).
+          const due = raw.due ? parseDate(String(raw.due).slice(0, 10)) : null;
+          const data = { item: raw.summary, due_date: ymd(nextDueAfter(due, todayStart(), it.rule)) };
           if (raw.description) data.description = raw.description;
           await this._svc(list, "add_item", data);
         }

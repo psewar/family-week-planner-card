@@ -163,9 +163,11 @@ default_kind: event                        # what a tap on an empty cell creates
 - **Recurring tasks** carry a `↻ …` line in their description – human readable and editable in
   any HA client: `↻ täglich`, `↻ alle 3 Tage`, `↻ wöchentlich`, `↻ alle 2 Wochen`,
   `↻ monatlich`, `↻ jährlich`, `↻ Mo–Fr`, `↻ Mo, Do` (weekday lists), or an RFC 5545
-  `FREQ=…` rule. Completing such a task marks it done **and adds the next occurrence**
-  (overdue tasks continue from today, so a late tick doesn't create a backlog). Un-ticking
-  removes that follow-up again.
+  `FREQ=…` rule. Completing such a task marks it done **and adds the next occurrence**: the
+  first date of the rhythm after today, counted from the task's own due date – a weekly chore due
+  on Thursday that is ticked off on Saturday comes back next Thursday, monthly/yearly chores keep
+  their day of month. Plain daily rhythms (`↻ alle 3 Tage`) restart from today instead, so a late
+  tick doesn't create a backlog. Un-ticking removes that follow-up again.
 - Completed tasks stay visible struck-through on their due day and are removed after
   `todo_cleanup_days`.
 - Tasks added by voice ("Füge Altpapier zu Familienaufgaben hinzu") or in the HA app have no
